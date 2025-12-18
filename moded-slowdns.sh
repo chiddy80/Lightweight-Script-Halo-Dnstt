@@ -11,7 +11,7 @@
 # -------------------------
 set -e  # Exit on error
 SCRIPT_NAME="slowdns-installer"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.5.0"
 
 # -------------------------
 # Colors
@@ -36,11 +36,11 @@ BACKUP_DIR="/root/slowdns-backup"
 # -------------------------
 # Dependencies
 # -------------------------
-REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server"
+REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server cmake build-essential git"
 DNSTT_SERVER_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
 SERVER_KEY_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
 SERVER_PUB_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
-BADVPN_URL="https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-udpgw"
+BADVPN_SOURCE_URL="https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz"
 
 # -------------------------
 # Logging
@@ -97,7 +97,7 @@ print_separator() {
 is_root() {
     [[ $EUID -eq 0 ]] || {
         log_error "This script must be run as root"
-        echo -e "${RED}Please run as: sudo bash $0${NC}"
+        echo -e "${RED}Please run as: sudo bash \$0${NC}"
         exit 1
     }
 }
@@ -263,40 +263,53 @@ EOF
 }
 
 # -------------------------
-# BadVPN Installation - FIXED
+# BadVPN Installation - FIXED COMPILATION
 # -------------------------
 install_badvpn() {
     log_info "Installing BadVPN UDPGW..."
     
-    # Try multiple download methods
-    if ! command -v badvpn-udpgw &>/dev/null; then
-        # Method 1: Direct download from GitHub
-        if wget -q --timeout=20 --tries=2 -O /usr/bin/badvpn-udpgw "$BADVPN_URL"; then
-            log_success "Downloaded BadVPN from GitHub"
-        else
-            # Method 2: Alternative source
-            log_warning "GitHub download failed, trying alternative..."
-            if wget -q --timeout=20 --tries=2 -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/ambrop72/badvpn/master/tun2socks/badvpn-udpgw"; then
-                log_success "Downloaded BadVPN from alternative source"
-            else
-                # Method 3: Build from source
-                log_warning "Download failed, attempting to build from source..."
-                cd /tmp
-                apt-get install -y cmake build-essential >/dev/null 2>&1
-                git clone https://github.com/ambrop72/badvpn.git 2>/dev/null
-                cd badvpn
-                mkdir build && cd build
-                cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1
-                make >/dev/null 2>&1
-                cp udpgw/badvpn-udpgw /usr/bin/
-                cd /root
-                log_success "Built BadVPN from source"
-            fi
-        fi
-        
+    # Check if BadVPN is already installed and working
+    if command -v badvpn-udpgw &>/dev/null && /usr/bin/badvpn-udpgw --help &>/dev/null; then
+        log_success "BadVPN already installed and working"
+        return 0
+    fi
+    
+    # Install build tools if not present
+    if ! command -v cmake &>/dev/null || ! command -v make &>/dev/null; then
+        log_info "Installing build tools (cmake, make)..."
+        apt-get install -y cmake build-essential >/dev/null 2>&1
+    fi
+    
+    # Download and compile BadVPN from source
+    log_info "Downloading BadVPN source code..."
+    cd /tmp
+    rm -rf badvpn-1.999.130 badvpn-1.999.130.tar.gz
+    
+    if ! wget -q --timeout=30 --tries=3 -O badvpn-1.999.130.tar.gz "$BADVPN_SOURCE_URL"; then
+        log_error "Failed to download BadVPN source code"
+        return 1
+    fi
+    
+    log_info "Extracting and compiling BadVPN..."
+    tar xvzf badvpn-1.999.130.tar.gz 2>/dev/null
+    cd badvpn-1.999.130
+    mkdir -p build && cd build
+    
+    # Configure and compile
+    cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1
+    if ! make >/dev/null 2>&1; then
+        log_error "Failed to compile BadVPN"
+        return 1
+    fi
+    
+    # Copy binary
+    if [[ -f udpgw/badvpn-udpgw ]]; then
+        cp udpgw/badvpn-udpgw /usr/bin/
         chmod +x /usr/bin/badvpn-udpgw
+        log_success "BadVPN compiled and installed successfully"
     else
-        log_success "BadVPN already installed"
+        log_error "BadVPN binary not found after compilation"
+        return 1
     fi
     
     # Create systemd service
@@ -457,7 +470,7 @@ list_ssh_users() {
 }
 
 # -------------------------
-# SlowDNS/DNSTT Installation with CUSTOM MTU
+# SlowDNS/DNSTT Installation with UNLIMITED MTU
 # -------------------------
 install_slowdns() {
     print_header
@@ -557,15 +570,16 @@ install_slowdns() {
         esac
     done
     
-    # MTU Selection
+    # UNLIMITED MTU Selection
     echo -e "\n${WHITE}Select MTU (Maximum Transmission Unit):${NC}"
     echo "1) Default (512)"
     echo "2) Recommended (1280)"
     echo "3) High Performance (1450)"
-    echo "4) Custom MTU"
+    echo "4) Jumbo Frames (9000)"
+    echo "5) Custom MTU (Any value)"
     
     while true; do
-        read -p "Choose MTU option (1-4): " mtu_choice
+        read -p "Choose MTU option (1-5): " mtu_choice
         case $mtu_choice in
             1)
                 MTU=512
@@ -580,12 +594,18 @@ install_slowdns() {
                 break
                 ;;
             4)
+                MTU=9000
+                break
+                ;;
+            5)
                 while true; do
-                    read -p "Enter custom MTU (68-1500): " MTU
-                    if is_number "$MTU" && [[ $MTU -ge 68 && $MTU -le 1500 ]]; then
-                        break
+                    read -p "Enter custom MTU (Minimum 68, No maximum limit): " MTU
+                    if is_number "$MTU" && [[ $MTU -ge 68 ]]; then
+                        echo -e "${YELLOW}Warning: Using MTU $MTU. Make sure your network supports this size.${NC}"
+                        read -p "Continue with MTU=$MTU? (y/N): " confirm
+                        [[ "$confirm" =~ ^[Yy]$ ]] && break
                     else
-                        echo -e "${RED}Invalid MTU. Must be between 68 and 1500${NC}"
+                        echo -e "${RED}Invalid MTU. Must be at least 68${NC}"
                     fi
                 done
                 break
@@ -675,7 +695,7 @@ EOF
         echo -e "✗ SSH Service: ${RED}FAILED${NC}"
     fi
     
-    print_separator
+        print_separator
     echo -e "${GREEN}✓ SlowDNS installation completed successfully!${NC}"
     echo -e "\n${WHITE}Configuration Summary:${NC}"
     echo -e "  NS Domain: ${CYAN}$ns_domain${NC}"
@@ -684,7 +704,7 @@ EOF
     echo -e "  BadVPN Port: ${CYAN}7300/tcp${NC}"
     echo -e "  MTU Value: ${CYAN}$MTU${NC}"
     
-        echo -e "\n${YELLOW}Important:${NC}"
+    echo -e "\n${YELLOW}Important:${NC}"
     echo -e "1. Configure DNS A record for $ns_domain to point to: $(curl -s ifconfig.me)"
     echo -e "2. Use the public key below in your client configuration"
     echo -e "3. Client MTU should be set to: $MTU"
