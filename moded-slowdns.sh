@@ -116,7 +116,7 @@ Wants=network.target
 After=network.target
 
 [Service]
-ExecStart=/root/dnstt/dnstt-server -udp :53 -mtu 1800 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
+ExecStart=/root/dnstt/dnstt-server -udp :5300 -mtu 512 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
 Restart=always
 RestartSec=2
 User=root
