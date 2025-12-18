@@ -1,1 +1,1 @@
-rm -rf InstallerScript.sh && wget https://raw.githubusercontent.com/ASHANTENNA/VPNScript/refs/heads/main/InstallerScript.sh -O InstallerScript.sh && chmod +x InstallerScript.sh && ./InstallerScript.sh
+rm -rf moded-slowdns.sh && wget https://raw.githubusercontent.com/ASHANTENNA/VPNScript/refs/heads/main/moded-slowdns.sh -O moded-slowdns.sh && chmod +x moded-slowdns.sh && ./moded-slowdns.sh
