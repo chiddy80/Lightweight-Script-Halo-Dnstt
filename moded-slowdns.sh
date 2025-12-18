@@ -11,7 +11,7 @@
 # -------------------------
 set -e  # Exit on error
 SCRIPT_NAME="slowdns-installer"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 # -------------------------
 # Colors
@@ -36,7 +36,7 @@ BACKUP_DIR="/root/slowdns-backup"
 # -------------------------
 # Dependencies
 # -------------------------
-REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils"
+REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server"
 DNSTT_SERVER_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
 SERVER_KEY_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
 SERVER_PUB_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
@@ -139,6 +139,16 @@ check_badvpn_status() {
     fi
 }
 
+check_ssh_status() {
+    if systemctl is-active --quiet ssh 2>/dev/null; then
+        echo -e "${GREEN}[RUNNING - ssh]${NC}"
+    elif systemctl is-active --quiet sshd 2>/dev/null; then
+        echo -e "${GREEN}[RUNNING - sshd]${NC}"
+    else
+        echo -e "${RED}[NOT RUNNING]${NC}"
+    fi
+}
+
 backup_config() {
     log_info "Creating backup..."
     mkdir -p "$BACKUP_DIR"
@@ -154,8 +164,21 @@ backup_config() {
 configure_ssh() {
     log_info "Configuring SSH..."
     
+    # Determine SSH service name
+    if systemctl list-unit-files | grep -q ssh.service; then
+        SSH_SERVICE="ssh"
+    elif systemctl list-unit-files | grep -q sshd.service; then
+        SSH_SERVICE="sshd"
+    else
+        log_warning "SSH service not found, installing openssh-server..."
+        apt-get install -y openssh-server >/dev/null 2>&1
+        SSH_SERVICE="ssh"
+    fi
+    
     # Backup original SSH config
-    cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
+    fi
     
     # Create custom config directory if it doesn't exist
     mkdir -p /etc/ssh/sshd_config.d
@@ -193,15 +216,24 @@ Compression delayed
 Protocol 2
 EOF
     
+    # Ensure main sshd_config includes the config directory
+    if ! grep -q "Include /etc/ssh/sshd_config.d/*.conf" /etc/ssh/sshd_config; then
+        echo "Include /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
+    fi
+    
     # Restart SSH service
-    systemctl restart sshd
+    systemctl restart $SSH_SERVICE 2>/dev/null || {
+        log_warning "Failed to restart $SSH_SERVICE, trying to enable and start..."
+        systemctl enable $SSH_SERVICE 2>/dev/null
+        systemctl start $SSH_SERVICE 2>/dev/null
+    }
     
     # Verify SSH is running
-    if systemctl is-active --quiet sshd; then
+    if systemctl is-active --quiet $SSH_SERVICE 2>/dev/null; then
         log_success "SSH configured and restarted successfully"
     else
-        log_error "Failed to restart SSH"
-        return 1
+        log_warning "SSH service might need manual configuration"
+        echo -e "${YELLOW}Please check SSH service manually${NC}"
     fi
 }
 
@@ -438,7 +470,7 @@ install_slowdns() {
     # Update system
     log_info "Updating system packages..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1
+        apt-get update -y >/dev/null 2>&1
     apt-get upgrade -y --with-new-pkgs >/dev/null 2>&1
     
     # Install dependencies
@@ -590,7 +622,7 @@ EOF
         echo -e "✗ BadVPN Service: ${RED}FAILED${NC}"
     fi
     
-    if systemctl is-active --quiet sshd; then
+    if systemctl is-active --quiet ssh; then
         echo -e "✓ SSH Service: ${GREEN}RUNNING${NC}"
     else
         echo -e "✗ SSH Service: ${RED}FAILED${NC}"
@@ -636,6 +668,7 @@ show_dnstt_info() {
     echo -e "${WHITE}Service Status:${NC}"
     echo -e "  DNSTT Tunnel: $(check_dnstt_status)"
     echo -e "  BadVPN UDPGW: $(check_badvpn_status)"
+    echo -e "  SSH Service: $(check_ssh_status)"
     
     echo -e "\n${WHITE}Configuration Details:${NC}"
     echo -e "  NS Domain: ${GREEN}${NS_DOMAIN:-Not set}${NC}"
@@ -657,7 +690,7 @@ show_dnstt_info() {
     journalctl -u dnstt.service -n 5 --no-pager 2>/dev/null || echo "No logs available"
     
     echo -e "\n${WHITE}Active Connections:${NC}"
-    ss -tulpn | grep -E ':5300|:7300' | awk '{print "  " $0}' || echo "  No active connections found"
+    ss -tulpn | grep -E ':5300|:7300|:22' | awk '{print "  " $0}' || echo "  No active connections found"
     
     print_footer
     echo -e "\n${YELLOW}Press Enter to continue...${NC}"
@@ -675,6 +708,7 @@ manage_services() {
         echo -e "${WHITE}Current Status:${NC}"
         echo -e "1. DNSTT Tunnel: $(check_dnstt_status)"
         echo -e "2. BadVPN UDPGW: $(check_badvpn_status)"
+        echo -e "3. SSH Service: $(check_ssh_status)"
         
         echo -e "\n${WHITE}Actions:${NC}"
         echo "1. Start DNSTT Service"
@@ -683,13 +717,18 @@ manage_services() {
         echo "4. Start BadVPN Service"
         echo "5. Stop BadVPN Service"
         echo "6. Restart BadVPN Service"
-        echo "7. View DNSTT Logs"
-        echo "8. View BadVPN Logs"
-        echo "9. Back to Main Menu"
+        echo "7. Start SSH Service"
+        echo "8. Stop SSH Service"
+        echo "9. Restart SSH Service"
+        echo "10. View DNSTT Logs"
+        echo "11. View BadVPN Logs"
+        echo "12. View SSH Logs"
+        echo "13. Back to Main Menu"
         
         echo -e "\n${WHITE}Select action:${NC}"
         read -r choice
-                case $choice in
+        
+        case $choice in
             1)
                 systemctl start dnstt.service
                 log_success "DNSTT service started"
@@ -721,16 +760,36 @@ manage_services() {
                 sleep 2
                 ;;
             7)
+                systemctl start ssh
+                log_success "SSH service started"
+                sleep 2
+                ;;
+            8)
+                systemctl stop ssh
+                log_success "SSH service stopped"
+                sleep 2
+                ;;
+            9)
+                systemctl restart ssh
+                log_success "SSH service restarted"
+                sleep 2
+                ;;
+            10)
                 echo -e "\n${CYAN}DNSTT Service Logs:${NC}"
                 journalctl -u dnstt.service -n 20 --no-pager
                 read -p "Press Enter to continue..."
                 ;;
-            8)
+            11)
                 echo -e "\n${CYAN}BadVPN Service Logs:${NC}"
                 journalctl -u badvpn.service -n 20 --no-pager
                 read -p "Press Enter to continue..."
                 ;;
-            9)
+            12)
+                echo -e "\n${CYAN}SSH Service Logs:${NC}"
+                journalctl -u ssh.service -n 20 --no-pager
+                read -p "Press Enter to continue..."
+                ;;
+            13)
                 break
                 ;;
             *)
@@ -824,9 +883,12 @@ uninstall_slowdns() {
         rm -f /etc/sysctl.d/99-slowdns-optimization.conf
         sysctl --system >/dev/null 2>&1
         
-        # Remove SSH config
-        rm -f /etc/ssh/sshd_config.d/slowdns.conf
-        systemctl restart sshd
+        # Restore original SSH config if backup exists
+        if ls /etc/ssh/sshd_config.backup.* 2>/dev/null; then
+            latest_backup=$(ls -t /etc/ssh/sshd_config.backup.* | head -1)
+            cp -f "$latest_backup" /etc/ssh/sshd_config
+            systemctl restart ssh
+        fi
         
         # Remove binaries
         rm -f /usr/bin/badvpn-udpgw
@@ -853,6 +915,7 @@ main_menu() {
         echo -e "${WHITE}Service Status:${NC}"
         echo -e "  SlowDNS/DNSTT: $(check_dnstt_status)"
         echo -e "  BadVPN UDPGW: $(check_badvpn_status)"
+        echo -e "  SSH Service: $(check_ssh_status)"
         
         print_separator
         
