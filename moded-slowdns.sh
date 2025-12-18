@@ -1,26 +1,35 @@
 #!/bin/bash
 
 # =========================================
-#  SLOWDNS MODED INSTALLER & PANEL
-#  Script by esim FREEGB
+#  SLOWDNS MODED INSTALLER & PANEL - REMASTERED
+#  Author: esim FREEGB
 #  Telegram: https://t.me/esimfreegb
 # =========================================
 
+# -------------------------
 # Colors
+# -------------------------
 GREEN='\033[1;32m'
 RED='\033[1;31m'
 CYAN='\033[1;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# -------------------------
+# Info file
+# -------------------------
 INFO_FILE="/etc/slowdns-info.conf"
 
+# -------------------------
 # Root check
+# -------------------------
 [[ $EUID -ne 0 ]] && echo -e "${RED}Run as root${NC}" && exit 1
 
 # -------------------------
-# Status check
+# Helpers
 # -------------------------
+is_number() { [[ $1 =~ ^[0-9]+$ ]]; }
+
 check_dnstt_status() {
     if systemctl is-active --quiet dnstt; then
         echo -e "${GREEN}[ON]${NC}"
@@ -34,7 +43,7 @@ check_dnstt_status() {
 # -------------------------
 fix_ssh() {
     mkdir -p /etc/ssh/sshd_config.d/disabled
-    mv /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config.d/disabled/ 2>/dev/null
+    mv /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config.d/disabled/ 2>/dev/null || true
 
 cat >/etc/ssh/sshd_config <<'EOF'
 Include /etc/ssh/sshd_config.d/*.conf
@@ -64,10 +73,10 @@ EOF
 }
 
 # -------------------------
-# Install BadVPN
+# BadVPN install
 # -------------------------
 install_badvpn() {
-    wget -qO /usr/bin/badvpn-udpgw https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-udpgw
+    wget -q --timeout=10 --tries=3 -O /usr/bin/badvpn-udpgw https://github.com/ambrop72/badvpn/releases/download/1.999.130/badvpn-udpgw
     chmod +x /usr/bin/badvpn-udpgw
 
 cat >/etc/systemd/system/badvpn.service <<EOF
@@ -88,7 +97,7 @@ EOF
 }
 
 # -------------------------
-# Create SSH User
+# SSH User management
 # -------------------------
 create_ssh_user() {
     read -p "Username: " u
@@ -100,9 +109,6 @@ create_ssh_user() {
     echo -e "${GREEN}User $u created successfully${NC}"
 }
 
-# -------------------------
-# Delete SSH User
-# -------------------------
 delete_ssh_user() {
     users=($(awk -F: '$3>=1000 && $1!="nobody"{print $1}' /etc/passwd))
     [[ ${#users[@]} -eq 0 ]] && echo -e "${RED}No users found${NC}" && return
@@ -116,20 +122,27 @@ delete_ssh_user() {
 }
 
 # -------------------------
-# Install SlowDNS
+# Install SlowDNS / DNSTT
 # -------------------------
 install_slowdns() {
-    apt-get update -y >/dev/null 2>&1
-    apt-get install -y wget curl screen iptables-persistent >/dev/null 2>&1
+    echo -e "${YELLOW}Updating system and installing dependencies...${NC}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt update -y >/dev/null 2>&1
+    apt upgrade -y >/dev/null 2>&1
+    apt install -y wget curl screen iptables-persistent >/dev/null 2>&1
 
+    echo -e "${YELLOW}Setting up directories...${NC}"
+    rm -rf /root/dnstt
     mkdir -p /root/dnstt
     cd /root/dnstt || exit
 
-    wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server
-    wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key
-    wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub
+    echo -e "${YELLOW}Downloading DNSTT binaries...${NC}"
+    wget -q --timeout=10 --tries=3 -O dnstt-server https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server
+    wget -q --timeout=10 --tries=3 -O server.key https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key
+    wget -q --timeout=10 --tries=3 -O server.pub https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub
     chmod +x dnstt-server
 
+    # Ask NS and forwarding port
     read -p "Enter NS Domain: " NS
     echo "1) SSH (22)"
     echo "2) V2Ray (8787)"
@@ -137,13 +150,14 @@ install_slowdns() {
 
     if [[ $psel == "2" ]]; then
         bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
-        echo -e "${YELLOW}Complete 3x-ui setup, copy panel info.${NC}"
+        echo -e "${YELLOW}3x-UI setup completed, copy panel info.${NC}"
         read -p "Press Enter to continue..."
         FPORT=8787
     else
         FPORT=22
     fi
 
+    echo -e "${YELLOW}Creating DNSTT systemd service...${NC}"
 cat >/etc/systemd/system/dnstt.service <<EOF
 [Unit]
 Description=DNSTT Tunnel
@@ -160,20 +174,24 @@ EOF
     systemctl daemon-reload
     systemctl enable --now dnstt
 
-    # Correct iptables rules for DNSTT
+    # Correct iptables
     iptables -I INPUT -p udp --dport 5300 -j ACCEPT
     iptables-save > /etc/iptables/rules.v4
 
+    # Apply fixes
     fix_ssh
     udp_boost
     install_badvpn
 
+    # Save info
 cat >$INFO_FILE <<EOF
 NS_DOMAIN=$NS
 FORWARD_PORT=$FPORT
 TUNNEL=127.0.0.1:$FPORT
 PUBKEY=$(cat /root/dnstt/server.pub)
 EOF
+
+    echo -e "${GREEN}SlowDNS / DNSTT installation completed!${NC}"
 }
 
 # -------------------------
@@ -189,10 +207,6 @@ dnstt_info() {
     echo "Public Key     :"
     echo "$PUBKEY"
     echo
-    echo "Use HTTP ASH Tunnel (recommend) ⚡"
-    echo "Set segments to 10"
-    echo "OR use HTTP Custom ✅"
-    echo
     echo "Developer: esim FREEGB"
     echo "Telegram 🇹🇿 : https://t.me/esimfreegb"
 }
@@ -205,15 +219,13 @@ while true; do
 echo
 echo "1. CREATE SSH USER"
 echo "2. DELETE SSH USER"
-echo "3. CHECK SSH (Coming soon)"
-echo "4. BLOCK SSH (Coming soon)"
-echo "5. BACK"
+echo "3. BACK"
 read -p "Select: " s
 case $s in
 1) create_ssh_user ;;
 2) delete_ssh_user ;;
-5) break ;;
-*) echo "Coming soon" ;;
+3) break ;;
+*) echo "Invalid option" ;;
 esac
 done
 }
@@ -236,5 +248,6 @@ case $m in
 2) dnstt_info; read -p "Press Enter..." ;;
 3) ssh_menu ;;
 4) exit ;;
+*) echo "Invalid option" ;;
 esac
 done
