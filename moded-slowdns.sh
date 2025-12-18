@@ -160,6 +160,7 @@ EOF
     systemctl daemon-reload
     systemctl enable --now dnstt
 
+    # Correct iptables rules for DNSTT
     iptables -I INPUT -p udp --dport 5300 -j ACCEPT
     iptables-save > /etc/iptables/rules.v4
 
