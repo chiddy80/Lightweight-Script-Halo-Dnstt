@@ -11,7 +11,7 @@
 # -------------------------
 set -e  # Exit on error
 SCRIPT_NAME="slowdns-installer"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.3.0"
 
 # -------------------------
 # Colors
@@ -141,9 +141,7 @@ check_badvpn_status() {
 
 check_ssh_status() {
     if systemctl is-active --quiet ssh 2>/dev/null; then
-        echo -e "${GREEN}[RUNNING - ssh]${NC}"
-    elif systemctl is-active --quiet sshd 2>/dev/null; then
-        echo -e "${GREEN}[RUNNING - sshd]${NC}"
+        echo -e "${GREEN}[RUNNING]${NC}"
     else
         echo -e "${RED}[NOT RUNNING]${NC}"
     fi
@@ -164,15 +162,10 @@ backup_config() {
 configure_ssh() {
     log_info "Configuring SSH..."
     
-    # Determine SSH service name
-    if systemctl list-unit-files | grep -q ssh.service; then
-        SSH_SERVICE="ssh"
-    elif systemctl list-unit-files | grep -q sshd.service; then
-        SSH_SERVICE="sshd"
-    else
-        log_warning "SSH service not found, installing openssh-server..."
+    # Install SSH if not installed
+    if ! dpkg -l | grep -q openssh-server; then
+        log_info "Installing OpenSSH server..."
         apt-get install -y openssh-server >/dev/null 2>&1
-        SSH_SERVICE="ssh"
     fi
     
     # Backup original SSH config
@@ -180,13 +173,11 @@ configure_ssh() {
         cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
     fi
     
-    # Create custom config directory if it doesn't exist
-    mkdir -p /etc/ssh/sshd_config.d
-    
-    # Create or update SSH config
-    cat > /etc/ssh/sshd_config.d/slowdns.conf << EOF
+    # Directly modify the sshd_config file
+    cat > /etc/ssh/sshd_config << 'EOF'
 # SlowDNS SSH Configuration
 Port 22
+Protocol 2
 PermitRootLogin yes
 PasswordAuthentication yes
 PubkeyAuthentication yes
@@ -213,27 +204,18 @@ PrintLastLog yes
 TCPKeepAlive yes
 UseDNS no
 Compression delayed
-Protocol 2
+Subsystem sftp /usr/lib/openssh/sftp-server
 EOF
     
-    # Ensure main sshd_config includes the config directory
-    if ! grep -q "Include /etc/ssh/sshd_config.d/*.conf" /etc/ssh/sshd_config; then
-        echo "Include /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
-    fi
-    
     # Restart SSH service
-    systemctl restart $SSH_SERVICE 2>/dev/null || {
-        log_warning "Failed to restart $SSH_SERVICE, trying to enable and start..."
-        systemctl enable $SSH_SERVICE 2>/dev/null
-        systemctl start $SSH_SERVICE 2>/dev/null
-    }
+    systemctl restart ssh
     
     # Verify SSH is running
-    if systemctl is-active --quiet $SSH_SERVICE 2>/dev/null; then
+    if systemctl is-active --quiet ssh; then
         log_success "SSH configured and restarted successfully"
     else
-        log_warning "SSH service might need manual configuration"
-        echo -e "${YELLOW}Please check SSH service manually${NC}"
+        log_error "Failed to restart SSH"
+        return 1
     fi
 }
 
@@ -281,18 +263,41 @@ EOF
 }
 
 # -------------------------
-# BadVPN Installation
+# BadVPN Installation - FIXED
 # -------------------------
 install_badvpn() {
     log_info "Installing BadVPN UDPGW..."
     
-    # Download BadVPN
-    if ! wget -q --timeout=30 --tries=3 --show-progress -O /usr/bin/badvpn-udpgw "$BADVPN_URL"; then
-        log_error "Failed to download BadVPN"
-        return 1
+    # Try multiple download methods
+    if ! command -v badvpn-udpgw &>/dev/null; then
+        # Method 1: Direct download from GitHub
+        if wget -q --timeout=20 --tries=2 -O /usr/bin/badvpn-udpgw "$BADVPN_URL"; then
+            log_success "Downloaded BadVPN from GitHub"
+        else
+            # Method 2: Alternative source
+            log_warning "GitHub download failed, trying alternative..."
+            if wget -q --timeout=20 --tries=2 -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/ambrop72/badvpn/master/tun2socks/badvpn-udpgw"; then
+                log_success "Downloaded BadVPN from alternative source"
+            else
+                # Method 3: Build from source
+                log_warning "Download failed, attempting to build from source..."
+                cd /tmp
+                apt-get install -y cmake build-essential >/dev/null 2>&1
+                git clone https://github.com/ambrop72/badvpn.git 2>/dev/null
+                cd badvpn
+                mkdir build && cd build
+                cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1
+                make >/dev/null 2>&1
+                cp udpgw/badvpn-udpgw /usr/bin/
+                cd /root
+                log_success "Built BadVPN from source"
+            fi
+        fi
+        
+        chmod +x /usr/bin/badvpn-udpgw
+    else
+        log_success "BadVPN already installed"
     fi
-    
-    chmod +x /usr/bin/badvpn-udpgw
     
     # Create systemd service
     cat > /etc/systemd/system/badvpn.service << EOF
@@ -324,7 +329,7 @@ EOF
         log_success "BadVPN installed and started successfully"
         return 0
     else
-        log_error "BadVPN failed to start"
+        log_warning "BadVPN service may need manual start"
         return 1
     fi
 }
@@ -452,7 +457,7 @@ list_ssh_users() {
 }
 
 # -------------------------
-# SlowDNS/DNSTT Installation
+# SlowDNS/DNSTT Installation with CUSTOM MTU
 # -------------------------
 install_slowdns() {
     print_header
@@ -470,7 +475,7 @@ install_slowdns() {
     # Update system
     log_info "Updating system packages..."
     export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y >/dev/null 2>&1
+    apt-get update -y >/dev/null 2>&1
     apt-get upgrade -y --with-new-pkgs >/dev/null 2>&1
     
     # Install dependencies
@@ -552,8 +557,47 @@ install_slowdns() {
         esac
     done
     
-    # Create DNSTT service
-    log_info "Creating DNSTT systemd service..."
+    # MTU Selection
+    echo -e "\n${WHITE}Select MTU (Maximum Transmission Unit):${NC}"
+    echo "1) Default (512)"
+    echo "2) Recommended (1280)"
+    echo "3) High Performance (1450)"
+    echo "4) Custom MTU"
+    
+    while true; do
+        read -p "Choose MTU option (1-4): " mtu_choice
+        case $mtu_choice in
+            1)
+                MTU=512
+                break
+                ;;
+            2)
+                MTU=1280
+                break
+                ;;
+            3)
+                MTU=1450
+                break
+                ;;
+            4)
+                while true; do
+                    read -p "Enter custom MTU (68-1500): " MTU
+                    if is_number "$MTU" && [[ $MTU -ge 68 && $MTU -le 1500 ]]; then
+                        break
+                    else
+                        echo -e "${RED}Invalid MTU. Must be between 68 and 1500${NC}"
+                    fi
+                done
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice${NC}"
+                ;;
+        esac
+    done
+    
+    # Create DNSTT service with custom MTU
+    log_info "Creating DNSTT systemd service with MTU: $MTU..."
     
     cat > /etc/systemd/system/dnstt.service << EOF
 [Unit]
@@ -566,7 +610,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=$DNSTT_DIR
-ExecStart=$DNSTT_DIR/dnstt-server -udp :5300 -mtu 512 -privkey-file $DNSTT_DIR/server.key $ns_domain 127.0.0.1:$forward_port
+Environment="MTU=$MTU"
+ExecStart=$DNSTT_DIR/dnstt-server -udp :5300 -mtu \$MTU -privkey-file $DNSTT_DIR/server.key $ns_domain 127.0.0.1:$forward_port
 Restart=always
 RestartSec=3
 LimitNOFILE=1000000
@@ -601,6 +646,7 @@ EOF
 NS_DOMAIN=$ns_domain
 FORWARD_PORT=$forward_port
 TUNNEL=127.0.0.1:$forward_port
+MTU=$MTU
 PUBKEY=$(cat "$DNSTT_DIR/server.pub")
 INSTALL_DATE=$(date +%Y-%m-%d)
 INSTALL_TIME=$(date +%H:%M:%S)
@@ -612,6 +658,7 @@ EOF
     
     if systemctl is-active --quiet dnstt.service; then
         echo -e "✓ DNSTT Service: ${GREEN}RUNNING${NC}"
+        echo -e "  MTU Setting: ${CYAN}$MTU${NC}"
     else
         echo -e "✗ DNSTT Service: ${RED}FAILED${NC}"
     fi
@@ -635,10 +682,12 @@ EOF
     echo -e "  Forward Port: ${CYAN}$forward_port${NC}"
     echo -e "  DNSTT Port: ${CYAN}5300/udp${NC}"
     echo -e "  BadVPN Port: ${CYAN}7300/tcp${NC}"
+    echo -e "  MTU Value: ${CYAN}$MTU${NC}"
     
-    echo -e "\n${YELLOW}Important:${NC}"
+        echo -e "\n${YELLOW}Important:${NC}"
     echo -e "1. Configure DNS A record for $ns_domain to point to: $(curl -s ifconfig.me)"
     echo -e "2. Use the public key below in your client configuration"
+    echo -e "3. Client MTU should be set to: $MTU"
     echo -e "\n${WHITE}Public Key:${NC}"
     cat "$DNSTT_DIR/server.pub"
     
@@ -674,6 +723,7 @@ show_dnstt_info() {
     echo -e "  NS Domain: ${GREEN}${NS_DOMAIN:-Not set}${NC}"
     echo -e "  Forward Port: ${GREEN}${FORWARD_PORT:-Not set}${NC}"
     echo -e "  Tunnel: ${GREEN}${TUNNEL:-Not set}${NC}"
+    echo -e "  MTU Value: ${GREEN}${MTU:-512}${NC}"
     
     if [[ -f "$DNSTT_DIR/server.pub" ]]; then
         echo -e "\n${WHITE}Public Key:${NC}"
@@ -996,7 +1046,6 @@ trap cleanup EXIT INT TERM
 
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
-    # Add any cleanup tasks here if needed
     log_info "Script terminated"
     exit 0
 }
@@ -1004,7 +1053,6 @@ cleanup() {
 # -------------------------
 # Main Execution
 # -------------------------
-# Check if we're being sourced or executed
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     init
     main_menu
