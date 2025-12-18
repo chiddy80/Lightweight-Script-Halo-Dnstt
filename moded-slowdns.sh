@@ -1,143 +1,156 @@
 #!/bin/bash
 
-# ===================================================
-# Fast DNSTT Installer (Optimized)
-# ===================================================
+is_number() {
+    [[ $1 =~ ^[0-9]+$ ]]
+}
 
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-
-# =================== COLORS ===================
-GREEN='\033[1;32m'
+# Colors
 YELLOW='\033[1;33m'
-CYAN='\033[1;36m'
 RED='\033[1;31m'
+CYAN='\033[1;36m'
+GREEN='\033[1;32m'
 NC='\033[0m'
 
-# =================== CHECK ROOT ===================
-if [[ "$(id -u)" -ne 0 ]]; then
-    echo -e "${RED}Error: Run this script as root!${NC}"
+# Check root
+if [ "$(whoami)" != "root" ]; then
+    echo "Error: This script must be run as root."
     exit 1
 fi
 
-# =================== FUNCTIONS ===================
-print_status() { echo -e "[*] $1"; }
-check_status() { if [ $? -eq 0 ]; then echo -e "[✓] Success"; else echo -e "[✗] Failed"; exit 1; fi; }
-is_number() { [[ $1 =~ ^[0-9]+$ ]]; }
-
-# =================== CLEAR SCREEN ===================
+# Banner
 clear
-echo -e "${CYAN}=== Fast DNSTT Installer ===${NC}"
-echo -e "${YELLOW}Author: Custom Script${NC}"
-echo -e "${GREEN}Version: 2.0${NC}"
+echo -e "$CYAN   A   $YELLOW SSS  $RED H   H"
+echo -e "$CYAN  A A  $YELLOW S    $RED H   H"
+echo -e "$CYAN AAAAA $YELLOW SSS  $RED HHHHH"
+echo -e "$CYAN A   A $YELLOW     S$RED H   H"
+echo -e "$CYAN A   A $YELLOW SSSS $RED H   H"
 echo ""
+echo -e "$YELLOW VPN Tunnel Installer by AhmedSCRIPT Hacker"
+echo "Version : 4.8"
+echo -e "$NC"
 
-# =================== STEP 0: FIREWALL/DNS ===================
-print_status "Disabling firewalls and systemd-resolved..."
-ufw disable 2>/dev/null || true
-systemctl stop ufw 2>/dev/null || true
-systemctl disable ufw 2>/dev/null || true
-systemctl stop systemd-resolved 2>/dev/null || true
-systemctl disable systemd-resolved 2>/dev/null || true
-[[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
-chmod 644 /etc/resolv.conf
-check_status
+# Menu
+echo "Select an option:"
+echo "1. Install DNSTT, DoH and DoT"
+echo "0. Exit"
 
-# =================== STEP 1: SSH OPTIMIZATION ===================
-print_status "Optimizing SSH for VPN tunneling..."
-cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
-sed -i '/^KexAlgorithms/d;/^Ciphers/d;/^MACs/d' /etc/ssh/sshd_config
-
-cat >> /etc/ssh/sshd_config << EOF
-
-# VPN Client Optimized SSH
-KexAlgorithms curve25519-sha256,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256
-Ciphers aes128-ctr,aes256-ctr,chacha20-poly1305@openssh.com
-MACs hmac-sha2-256,hmac-sha2-512
-EOF
-
-systemctl restart ssh
-check_status
-
-# =================== STEP 2: FAST DEPENDENCY INSTALL ===================
-print_status "Installing required packages..."
-apt update -qq && apt upgrade -y -qq
-apt install -y -qq wget screen lsof iptables-persistent
-check_status
-
-# =================== STEP 3: DNSTT SETUP ===================
-print_status "Setting up DNSTT..."
-rm -rf /root/dnstt
-mkdir -p /root/dnstt
-cd /root/dnstt || exit 1
-
-# Use parallel wget for speed, quiet mode
-print_status "Downloading DNSTT binaries and keys..."
-wget -q -O dnstt-server "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server" &
-wget -q -O server.key "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key" &
-wget -q -O server.pub "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub" &
-wait
-chmod +x dnstt-server server.key server.pub
-check_status
-
-echo -e "${CYAN}DNSTT Public Key:${NC}"
-cat server.pub
-read -p "Copy the public key and press Enter..."
-
-# =================== STEP 4: USER CONFIG ===================
-while true; do
-    read -p "Enter your Nameserver (NS): " ns
-    [[ -n "$ns" ]] && break
-done
-
-while true; do
-    read -p "Enter target TCP port (1-65535, e.g., 22): " target_port
-    if is_number "$target_port" && [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ]; then
-        break
+selected_option=-1
+while [ $selected_option -lt 0 ] || [ $selected_option -gt 1 ]; do
+    echo -e "$YELLOW"
+    read -p "Enter number (0-1): " input
+    echo -e "$NC"
+    if [[ $input =~ ^[0-9]+$ ]]; then
+        selected_option=$input
+    else
+        echo -e "$YELLOW Invalid input. Enter a number.$NC"
     fi
 done
 
-# =================== STEP 5: IPTABLES ===================
-print_status "Configuring iptables..."
-iptables -I INPUT -p udp --dport 53 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-iptables -I INPUT -p tcp --dport "$target_port" -j ACCEPT
-iptables-save > /etc/iptables/rules.v4
-check_status
+if [ "$selected_option" -eq 1 ]; then
+    echo -e "$YELLOW Installing DNSTT, DoH and DoT... $NC"
+    apt -y update && apt -y upgrade
+    apt -y install iptables-persistent wget screen lsof sudo
 
-# =================== STEP 6: SYSTEMD SERVICE ===================
-print_status "Creating DNSTT systemd service..."
-cat >/etc/systemd/system/dnstt.service << EOF
+    # Prepare folder
+    rm -rf /root/dnstt
+    mkdir /root/dnstt
+    cd /root/dnstt
+
+    # Download DNSTT server and keys
+    wget -O dnstt-server https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server
+    chmod 755 dnstt-server    
+    wget -O server.key https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key
+    wget -O server.pub https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub
+
+    # Show public key
+    echo -e "$CYAN"
+    echo "=============================================="
+    echo "YOUR DNSTT PUBLIC KEY:"
+    cat server.pub
+    echo "=============================================="
+    echo -e "$NC"
+    read -p "Copy the public key above and press Enter when done"
+
+    # Prompt for Nameserver (without touching environment)
+    read -p "Enter your Nameserver domain (e.g., ns.example.com): " ns
+
+    # Setup iptables
+    iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+    iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+    iptables-save > /etc/iptables/rules.v4
+
+    # Target port
+    while true; do
+        read -p "Target TCP Port for tunnel host (127.0.0.1:22 recommended): " target_port
+        if is_number "$target_port" && [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ]; then
+            break
+        else
+            echo -e "$YELLOW Invalid port number. Enter 1-65535.$NC"
+        fi
+    done
+
+    # Systemd service with MTU 180
+    cat >/etc/systemd/system/dnstt.service <<EOF
 [Unit]
 Description=DNSTT Tunnel Server
 Wants=network.target
 After=network.target
 
 [Service]
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -mtu 512 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
+ExecStart=/root/dnstt/dnstt-server -udp :53 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
 Restart=always
-RestartSec=2
-User=root
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=true
+RestartSec=3
+Environment="MTU=1800"
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-chmod 644 /etc/systemd/system/dnstt.service
-systemctl daemon-reload
-systemctl enable --now dnstt
-check_status
+    systemctl daemon-reload
+    systemctl start dnstt
+    systemctl enable dnstt
 
-# =================== STEP 7: STATUS ===================
-print_status "Checking DNSTT status..."
-lsof -i :5300 || true
-systemctl status dnstt --no-pager -l
+    lsof -i :5300
 
-echo -e "${GREEN}DNSTT installation completed successfully!${NC}"
-echo -e "${YELLOW}Nameserver: $ns | Target Port: $target_port${NC}"
-echo -e "${CYAN}Public Key:${NC} $(cat /root/dnstt/server.pub | tr -d '\n')"
+    echo -e "$GREEN DNSTT installation completed! $NC"
+    echo -e "$CYAN"
+    echo "Your DNSTT public key (copy this for client config):"
+    cat /root/dnstt/server.pub
+    echo -e "$NC"
+    echo "Tunnel host: 127.0.0.1:$target_port"
+    echo "You can connect using your root username and password or a sudo user."
+
+    # Create new user
+    read -p "Enter the username to create for DNSTT tunnel: " tunnel_user
+    read -s -p "Enter password for $tunnel_user: " tunnel_pass
+    echo
+    useradd -m -s /bin/bash "$tunnel_user"
+    echo "$tunnel_user:$tunnel_pass" | chpasswd
+    usermod -aG sudo "$tunnel_user"
+    echo -e "$GREEN User $tunnel_user created with sudo privileges.$NC"
+
+    # Fix SSH root login
+    echo "[+] Fixing SSH root & password login..."
+    mkdir -p /etc/ssh/sshd_config.d/disabled
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        mv "$f" /etc/ssh/sshd_config.d/disabled/ 2>/dev/null
+    done
+
+    cat >/etc/ssh/sshd_config <<'EOF'
+Include /etc/ssh/sshd_config.d/*.conf
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+UsePAM yes
+KbdInteractiveAuthentication no
+EOF
+
+    systemctl restart ssh
+
+    echo -e "$YELLOW Rebooting system in 10 seconds... $NC"
+    sleep 10
+    reboot
+else
+    echo -e "$YELLOW Goodbye! $NC"
+    exit 0
+fi
