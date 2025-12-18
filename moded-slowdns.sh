@@ -11,7 +11,7 @@
 # -------------------------
 set -e  # Exit on error
 SCRIPT_NAME="slowdns-installer"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 
 # -------------------------
 # Colors
@@ -34,13 +34,12 @@ LOG_FILE="/var/log/slowdns-installer.log"
 BACKUP_DIR="/root/slowdns-backup"
 
 # -------------------------
-# Dependencies
+# Dependencies (BadVPN removed)
 # -------------------------
-REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server cmake build-essential git"
+REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server"
 DNSTT_SERVER_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
 SERVER_KEY_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
 SERVER_PUB_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
-BADVPN_SOURCE_URL="https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz"
 
 # -------------------------
 # Logging
@@ -131,14 +130,6 @@ check_dnstt_status() {
     fi
 }
 
-check_badvpn_status() {
-    if systemctl is-active --quiet badvpn.service 2>/dev/null; then
-        echo -e "${GREEN}[RUNNING]${NC}"
-    else
-        echo -e "${RED}[NOT RUNNING]${NC}"
-    fi
-}
-
 check_ssh_status() {
     if systemctl is-active --quiet ssh 2>/dev/null; then
         echo -e "${GREEN}[RUNNING]${NC}"
@@ -152,7 +143,6 @@ backup_config() {
     mkdir -p "$BACKUP_DIR"
     cp -f "$INFO_FILE" "$BACKUP_DIR/" 2>/dev/null || true
     cp -f /etc/systemd/system/dnstt.service "$BACKUP_DIR/" 2>/dev/null || true
-    cp -f /etc/systemd/system/badvpn.service "$BACKUP_DIR/" 2>/dev/null || true
     iptables-save > "$BACKUP_DIR/iptables.backup" 2>/dev/null || true
 }
 
@@ -260,91 +250,6 @@ EOF
     sysctl --system >/dev/null 2>&1
     
     log_success "Network optimization applied"
-}
-
-# -------------------------
-# BadVPN Installation - FIXED COMPILATION
-# -------------------------
-install_badvpn() {
-    log_info "Installing BadVPN UDPGW..."
-    
-    # Check if BadVPN is already installed and working
-    if command -v badvpn-udpgw &>/dev/null && /usr/bin/badvpn-udpgw --help &>/dev/null; then
-        log_success "BadVPN already installed and working"
-        return 0
-    fi
-    
-    # Install build tools if not present
-    if ! command -v cmake &>/dev/null || ! command -v make &>/dev/null; then
-        log_info "Installing build tools (cmake, make)..."
-        apt-get install -y cmake build-essential >/dev/null 2>&1
-    fi
-    
-    # Download and compile BadVPN from source
-    log_info "Downloading BadVPN source code..."
-    cd /tmp
-    rm -rf badvpn-1.999.130 badvpn-1.999.130.tar.gz
-    
-    if ! wget -q --timeout=30 --tries=3 -O badvpn-1.999.130.tar.gz "$BADVPN_SOURCE_URL"; then
-        log_error "Failed to download BadVPN source code"
-        return 1
-    fi
-    
-    log_info "Extracting and compiling BadVPN..."
-    tar xvzf badvpn-1.999.130.tar.gz 2>/dev/null
-    cd badvpn-1.999.130
-    mkdir -p build && cd build
-    
-    # Configure and compile
-    cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 >/dev/null 2>&1
-    if ! make >/dev/null 2>&1; then
-        log_error "Failed to compile BadVPN"
-        return 1
-    fi
-    
-    # Copy binary
-    if [[ -f udpgw/badvpn-udpgw ]]; then
-        cp udpgw/badvpn-udpgw /usr/bin/
-        chmod +x /usr/bin/badvpn-udpgw
-        log_success "BadVPN compiled and installed successfully"
-    else
-        log_error "BadVPN binary not found after compilation"
-        return 1
-    fi
-    
-    # Create systemd service
-    cat > /etc/systemd/system/badvpn.service << EOF
-[Unit]
-Description=BadVPN UDP Gateway
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=root
-Group=root
-ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500 --max-connections-for-client 3
-Restart=always
-RestartSec=3
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    # Enable and start service
-    systemctl daemon-reload
-    systemctl enable badvpn.service
-    systemctl start badvpn.service
-    
-    # Verify installation
-    if systemctl is-active --quiet badvpn.service; then
-        log_success "BadVPN installed and started successfully"
-        return 0
-    else
-        log_warning "BadVPN service may need manual start"
-        return 1
-    fi
 }
 
 # -------------------------
@@ -657,7 +562,6 @@ EOF
     # Apply optimizations
     configure_ssh
     optimize_network
-    install_badvpn
     
     # Save configuration
     cat > "$INFO_FILE" << EOF
@@ -683,25 +587,18 @@ EOF
         echo -e "✗ DNSTT Service: ${RED}FAILED${NC}"
     fi
     
-    if systemctl is-active --quiet badvpn.service; then
-        echo -e "✓ BadVPN Service: ${GREEN}RUNNING${NC}"
-    else
-        echo -e "✗ BadVPN Service: ${RED}FAILED${NC}"
-    fi
-    
     if systemctl is-active --quiet ssh; then
         echo -e "✓ SSH Service: ${GREEN}RUNNING${NC}"
     else
         echo -e "✗ SSH Service: ${RED}FAILED${NC}"
     fi
     
-        print_separator
+    print_separator
     echo -e "${GREEN}✓ SlowDNS installation completed successfully!${NC}"
     echo -e "\n${WHITE}Configuration Summary:${NC}"
     echo -e "  NS Domain: ${CYAN}$ns_domain${NC}"
     echo -e "  Forward Port: ${CYAN}$forward_port${NC}"
     echo -e "  DNSTT Port: ${CYAN}5300/udp${NC}"
-    echo -e "  BadVPN Port: ${CYAN}7300/tcp${NC}"
     echo -e "  MTU Value: ${CYAN}$MTU${NC}"
     
     echo -e "\n${YELLOW}Important:${NC}"
@@ -736,7 +633,6 @@ show_dnstt_info() {
     # Display service status
     echo -e "${WHITE}Service Status:${NC}"
     echo -e "  DNSTT Tunnel: $(check_dnstt_status)"
-    echo -e "  BadVPN UDPGW: $(check_badvpn_status)"
     echo -e "  SSH Service: $(check_ssh_status)"
     
     echo -e "\n${WHITE}Configuration Details:${NC}"
@@ -760,7 +656,7 @@ show_dnstt_info() {
     journalctl -u dnstt.service -n 5 --no-pager 2>/dev/null || echo "No logs available"
     
     echo -e "\n${WHITE}Active Connections:${NC}"
-    ss -tulpn | grep -E ':5300|:7300|:22' | awk '{print "  " $0}' || echo "  No active connections found"
+    ss -tulpn | grep -E ':5300|:22' | awk '{print "  " $0}' || echo "  No active connections found"
     
     print_footer
     echo -e "\n${YELLOW}Press Enter to continue...${NC}"
@@ -768,32 +664,23 @@ show_dnstt_info() {
 }
 
 # -------------------------
-# Service Management
+# Service Management (BadVPN removed)
 # -------------------------
 manage_services() {
     while true; do
         print_header
         echo -e "${CYAN}━━━━━━━━ SERVICE MANAGEMENT ━━━━━━━━${NC}\n"
         
-        echo -e "${WHITE}Current Status:${NC}"
-        echo -e "1. DNSTT Tunnel: $(check_dnstt_status)"
-        echo -e "2. BadVPN UDPGW: $(check_badvpn_status)"
-        echo -e "3. SSH Service: $(check_ssh_status)"
-        
-        echo -e "\n${WHITE}Actions:${NC}"
+                echo -e "\n${WHITE}Actions:${NC}"
         echo "1. Start DNSTT Service"
         echo "2. Stop DNSTT Service"
         echo "3. Restart DNSTT Service"
-        echo "4. Start BadVPN Service"
-        echo "5. Stop BadVPN Service"
-        echo "6. Restart BadVPN Service"
-        echo "7. Start SSH Service"
-        echo "8. Stop SSH Service"
-        echo "9. Restart SSH Service"
-        echo "10. View DNSTT Logs"
-        echo "11. View BadVPN Logs"
-        echo "12. View SSH Logs"
-        echo "13. Back to Main Menu"
+        echo "4. Start SSH Service"
+        echo "5. Stop SSH Service"
+        echo "6. Restart SSH Service"
+        echo "7. View DNSTT Logs"
+        echo "8. View SSH Logs"
+        echo "9. Back to Main Menu"
         
         echo -e "\n${WHITE}Select action:${NC}"
         read -r choice
@@ -815,51 +702,31 @@ manage_services() {
                 sleep 2
                 ;;
             4)
-                systemctl start badvpn.service
-                log_success "BadVPN service started"
-                sleep 2
-                ;;
-            5)
-                systemctl stop badvpn.service
-                log_success "BadVPN service stopped"
-                sleep 2
-                ;;
-            6)
-                systemctl restart badvpn.service
-                log_success "BadVPN service restarted"
-                sleep 2
-                ;;
-            7)
                 systemctl start ssh
                 log_success "SSH service started"
                 sleep 2
                 ;;
-            8)
+            5)
                 systemctl stop ssh
                 log_success "SSH service stopped"
                 sleep 2
                 ;;
-            9)
+            6)
                 systemctl restart ssh
                 log_success "SSH service restarted"
                 sleep 2
                 ;;
-            10)
+            7)
                 echo -e "\n${CYAN}DNSTT Service Logs:${NC}"
                 journalctl -u dnstt.service -n 20 --no-pager
                 read -p "Press Enter to continue..."
                 ;;
-            11)
-                echo -e "\n${CYAN}BadVPN Service Logs:${NC}"
-                journalctl -u badvpn.service -n 20 --no-pager
-                read -p "Press Enter to continue..."
-                ;;
-            12)
+            8)
                 echo -e "\n${CYAN}SSH Service Logs:${NC}"
                 journalctl -u ssh.service -n 20 --no-pager
                 read -p "Press Enter to continue..."
                 ;;
-            13)
+            9)
                 break
                 ;;
             *)
@@ -910,7 +777,7 @@ ssh_management_menu() {
 }
 
 # -------------------------
-# Uninstallation
+# Uninstallation (BadVPN removed)
 # -------------------------
 uninstall_slowdns() {
     print_header
@@ -919,9 +786,8 @@ uninstall_slowdns() {
     echo -e "${YELLOW}WARNING: This will remove all SlowDNS components${NC}\n"
     echo -e "The following will be removed:"
     echo "1. DNSTT Service"
-    echo "2. BadVPN Service"
-    echo "3. Configuration files"
-    echo "4. Iptables rules"
+    echo "2. Configuration files"
+    echo "3. Iptables rules"
     
     echo -e "\n${RED}This action cannot be undone!${NC}"
     read -p "Are you sure you want to uninstall? (y/N): " confirm
@@ -929,17 +795,14 @@ uninstall_slowdns() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_info "Starting uninstallation..."
         
-        # Stop services
+        # Stop service
         systemctl stop dnstt.service 2>/dev/null || true
-        systemctl stop badvpn.service 2>/dev/null || true
         
-        # Disable services
+        # Disable service
         systemctl disable dnstt.service 2>/dev/null || true
-        systemctl disable badvpn.service 2>/dev/null || true
         
-        # Remove services
+        # Remove service
         rm -f /etc/systemd/system/dnstt.service
-        rm -f /etc/systemd/system/badvpn.service
         
         # Remove configuration
         rm -f "$INFO_FILE"
@@ -960,9 +823,6 @@ uninstall_slowdns() {
             systemctl restart ssh
         fi
         
-        # Remove binaries
-        rm -f /usr/bin/badvpn-udpgw
-        
         systemctl daemon-reload
         
         echo -e "\n${GREEN}✓ SlowDNS has been successfully uninstalled${NC}"
@@ -976,7 +836,7 @@ uninstall_slowdns() {
 }
 
 # -------------------------
-# Main Menu
+# Main Menu (BadVPN removed)
 # -------------------------
 main_menu() {
     while true; do
@@ -984,7 +844,6 @@ main_menu() {
         
         echo -e "${WHITE}Service Status:${NC}"
         echo -e "  SlowDNS/DNSTT: $(check_dnstt_status)"
-        echo -e "  BadVPN UDPGW: $(check_badvpn_status)"
         echo -e "  SSH Service: $(check_ssh_status)"
         
         print_separator
