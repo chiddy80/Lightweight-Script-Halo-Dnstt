@@ -56,10 +56,6 @@ check_status
 sudo chmod +x sl-fix
 check_status
 
-print_status "Running SSLH fix..."
-sudo ./sl-fix
-check_status
-
 cd ~ || exit 1
 
 print_status "Configuring SSH..."
@@ -73,13 +69,13 @@ mkdir -p /etc/slowdns
 chmod 777 /etc/slowdns
 
 print_status "Downloading SlowDNS files..."
-wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
+wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
 check_status
 
-wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
+wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
 check_status
 
-wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
+wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
 check_status
 
 chmod +x /etc/slowdns/server.key /etc/slowdns/server.pub /etc/slowdns/sldns-server
@@ -99,12 +95,12 @@ fi
 # Create service file
 tee /etc/systemd/system/server-sldns.service > /dev/null << EOF
 [Unit]
-Description=SlowDNS Server esimfreegb
+Description=DNSTT by mrchiddy
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/etc/slowdns/sldns-server -udp :53 -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:22
+ExecStart=/etc/slowdns/sldns-server -udp :5300 -mtu 512 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:22
 Restart=always
 RestartSec=5
 
