@@ -9,9 +9,9 @@
 # -------------------------
 # Configuration
 # -------------------------
-set -e  # Exit on error
+set -e
 SCRIPT_NAME="slowdns-installer"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="2.0.0"
 
 # -------------------------
 # Colors
@@ -34,7 +34,7 @@ LOG_FILE="/var/log/slowdns-installer.log"
 BACKUP_DIR="/root/slowdns-backup"
 
 # -------------------------
-# Dependencies (BadVPN removed)
+# Dependencies
 # -------------------------
 REQUIRED_PACKAGES="wget curl screen iptables-persistent net-tools dnsutils openssh-server"
 DNSTT_SERVER_URL="https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
@@ -105,10 +105,7 @@ is_number() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-is_valid_domain() {
-    [[ "$1" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]
-}
-
+# NO DOMAIN VALIDATION - ACCEPT ANY NS RECORD
 check_internet() {
     if ! ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
         log_error "No internet connection"
@@ -152,18 +149,15 @@ backup_config() {
 configure_ssh() {
     log_info "Configuring SSH..."
     
-    # Install SSH if not installed
     if ! dpkg -l | grep -q openssh-server; then
         log_info "Installing OpenSSH server..."
         apt-get install -y openssh-server >/dev/null 2>&1
     fi
     
-    # Backup original SSH config
     if [[ -f /etc/ssh/sshd_config ]]; then
         cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d_%H%M%S)
     fi
     
-    # Directly modify the sshd_config file
     cat > /etc/ssh/sshd_config << 'EOF'
 # SlowDNS SSH Configuration
 Port 22
@@ -197,10 +191,8 @@ Compression delayed
 Subsystem sftp /usr/lib/openssh/sftp-server
 EOF
     
-    # Restart SSH service
     systemctl restart ssh
     
-    # Verify SSH is running
     if systemctl is-active --quiet ssh; then
         log_success "SSH configured and restarted successfully"
     else
@@ -245,7 +237,6 @@ net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_keepalive_intvl = 15
 EOF
     
-    # Apply sysctl settings
     sysctl -p /etc/sysctl.d/99-slowdns-optimization.conf >/dev/null 2>&1 || true
     sysctl --system >/dev/null 2>&1
     
@@ -258,7 +249,6 @@ EOF
 create_ssh_user() {
     echo -e "\n${CYAN}━━━━━━━━ CREATE SSH USER ━━━━━━━━${NC}"
     
-    # Get username
     while true; do
         read -p "Username (3-32 chars, letters/numbers only): " username
         if [[ "$username" =~ ^[a-zA-Z0-9]{3,32}$ ]]; then
@@ -272,7 +262,6 @@ create_ssh_user() {
         fi
     done
     
-    # Get password
     while true; do
         read -sp "Password (min 8 chars): " password
         echo
@@ -289,11 +278,9 @@ create_ssh_user() {
         fi
     done
     
-    # Create user
     if useradd -m -s /bin/bash -G sudo "$username" 2>/dev/null; then
         echo "$username:$password" | chpasswd
         
-        # Set up SSH directory
         mkdir -p "/home/$username/.ssh"
         chmod 700 "/home/$username/.ssh"
         chown -R "$username:$username" "/home/$username"
@@ -309,7 +296,6 @@ create_ssh_user() {
 delete_ssh_user() {
     echo -e "\n${CYAN}━━━━━━━━ DELETE SSH USER ━━━━━━━━${NC}"
     
-    # Get all non-system users
     users=($(awk -F: '$3 >= 1000 && $1 != "nobody" && $1 != "systemd-*" {print $1}' /etc/passwd))
     
     if [[ ${#users[@]} -eq 0 ]]; then
@@ -317,14 +303,12 @@ delete_ssh_user() {
         return
     fi
     
-    # Display users
     echo -e "${WHITE}Available users:${NC}"
     for i in "${!users[@]}"; do
         echo "$((i+1)). ${users[$i]}"
     done
     echo "$(( ${#users[@]} + 1 )). Cancel"
     
-    # Get selection
     while true; do
         read -p "Select user to delete (1-${#users[@]}): " selection
         if is_number "$selection"; then
@@ -339,7 +323,6 @@ delete_ssh_user() {
         echo -e "${RED}Invalid selection${NC}"
     done
     
-    # Confirm deletion
     read -p "Are you sure you want to delete user '$user_to_delete'? (y/N): " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         if userdel -r "$user_to_delete" 2>/dev/null; then
@@ -375,42 +358,35 @@ list_ssh_users() {
 }
 
 # -------------------------
-# SlowDNS/DNSTT Installation with UNLIMITED MTU
+# SlowDNS Installation - NO NS VALIDATION
 # -------------------------
 install_slowdns() {
     print_header
     echo -e "${YELLOW}━━━━━━━━ SLOWDNS INSTALLATION ━━━━━━━━${NC}\n"
     
-    # Check internet
     if ! check_internet; then
         echo -e "${RED}No internet connection. Please check your network.${NC}"
         return 1
     fi
     
-    # Backup existing config
     backup_config
     
-    # Update system
     log_info "Updating system packages..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1
     apt-get upgrade -y --with-new-pkgs >/dev/null 2>&1
     
-    # Install dependencies
     log_info "Installing dependencies..."
     apt-get install -y $REQUIRED_PACKAGES >/dev/null 2>&1
     
-    # Clean up previous installation
     log_info "Cleaning up previous installation..."
     systemctl stop dnstt.service 2>/dev/null || true
     systemctl disable dnstt.service 2>/dev/null || true
     rm -rf "$DNSTT_DIR"
     
-    # Create DNSTT directory
     mkdir -p "$DNSTT_DIR"
     cd "$DNSTT_DIR" || exit 1
     
-    # Download DNSTT files
     log_info "Downloading DNSTT binaries..."
     
     for url in "$DNSTT_SERVER_URL" "$SERVER_KEY_URL" "$SERVER_PUB_URL"; do
@@ -423,20 +399,11 @@ install_slowdns() {
     
     chmod +x dnstt-server
     
-    # Get configuration
     echo -e "\n${WHITE}━━━━━━━━ CONFIGURATION ━━━━━━━━${NC}"
     
-    # NS Domain
-    while true; do
-        read -p "Enter NS Domain (e.g., ns1.yourdomain.com): " ns_domain
-        if is_valid_domain "$ns_domain"; then
-            break
-        else
-            echo -e "${RED}Invalid domain format${NC}"
-        fi
-    done
+    # NO DOMAIN VALIDATION - ACCEPT ANY NS RECORD
+    read -p "Enter NS Domain (e.g., ns1.yourdomain.com or any NS record): " ns_domain
     
-    # Port selection
     echo -e "\n${WHITE}Select forwarding port:${NC}"
     echo "1) SSH (Port 22)"
     echo "2) V2Ray (Port 8787)"
@@ -475,7 +442,6 @@ install_slowdns() {
         esac
     done
     
-    # UNLIMITED MTU Selection
     echo -e "\n${WHITE}Select MTU (Maximum Transmission Unit):${NC}"
     echo "1) Default (512)"
     echo "2) Recommended (1280)"
@@ -521,7 +487,6 @@ install_slowdns() {
         esac
     done
     
-    # Create DNSTT service with custom MTU
     log_info "Creating DNSTT systemd service with MTU: $MTU..."
     
     cat > /etc/systemd/system/dnstt.service << EOF
@@ -547,23 +512,19 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     
-    # Configure firewall
     log_info "Configuring firewall..."
     iptables -I INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null || true
     iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
     netfilter-persistent save 2>/dev/null || true
     iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
     
-    # Enable and start services
     systemctl daemon-reload
     systemctl enable dnstt.service
     systemctl start dnstt.service
     
-    # Apply optimizations
     configure_ssh
     optimize_network
     
-    # Save configuration
     cat > "$INFO_FILE" << EOF
 # SlowDNS Configuration
 # Generated on $(date)
@@ -576,7 +537,6 @@ INSTALL_DATE=$(date +%Y-%m-%d)
 INSTALL_TIME=$(date +%H:%M:%S)
 EOF
     
-    # Verify installation
     echo -e "\n${WHITE}━━━━━━━━ VERIFICATION ━━━━━━━━${NC}"
     sleep 2
     
@@ -627,10 +587,8 @@ show_dnstt_info() {
     
     echo -e "${CYAN}━━━━━━━━ SLOWDNS INFORMATION ━━━━━━━━${NC}\n"
     
-    # Load configuration
     source "$INFO_FILE" 2>/dev/null
     
-    # Display service status
     echo -e "${WHITE}Service Status:${NC}"
     echo -e "  DNSTT Tunnel: $(check_dnstt_status)"
     echo -e "  SSH Service: $(check_ssh_status)"
@@ -646,12 +604,10 @@ show_dnstt_info() {
         echo -e "${CYAN}$(cat "$DNSTT_DIR/server.pub")${NC}"
     fi
     
-    # Show system information
     echo -e "\n${WHITE}System Information:${NC}"
     echo -e "  Server IP: $(curl -s ifconfig.me 2>/dev/null || echo 'Unknown')"
     echo -e "  Uptime: $(uptime -p | sed 's/up //')"
     
-    # Show recent logs
     echo -e "\n${WHITE}Recent DNSTT Logs (last 5 lines):${NC}"
     journalctl -u dnstt.service -n 5 --no-pager 2>/dev/null || echo "No logs available"
     
@@ -664,14 +620,18 @@ show_dnstt_info() {
 }
 
 # -------------------------
-# Service Management (BadVPN removed)
+# Service Management
 # -------------------------
 manage_services() {
     while true; do
         print_header
         echo -e "${CYAN}━━━━━━━━ SERVICE MANAGEMENT ━━━━━━━━${NC}\n"
         
-                echo -e "\n${WHITE}Actions:${NC}"
+        echo -e "${WHITE}Current Status:${NC}"
+        echo -e "1. DNSTT Tunnel: $(check_dnstt_status)"
+        echo -e "2. SSH Service: $(check_ssh_status)"
+        
+        echo -e "\n${WHITE}Actions:${NC}"
         echo "1. Start DNSTT Service"
         echo "2. Stop DNSTT Service"
         echo "3. Restart DNSTT Service"
@@ -712,7 +672,7 @@ manage_services() {
                 sleep 2
                 ;;
             6)
-                systemctl restart ssh
+                                systemctl restart ssh
                 log_success "SSH service restarted"
                 sleep 2
                 ;;
@@ -777,7 +737,7 @@ ssh_management_menu() {
 }
 
 # -------------------------
-# Uninstallation (BadVPN removed)
+# Uninstallation
 # -------------------------
 uninstall_slowdns() {
     print_header
@@ -795,28 +755,19 @@ uninstall_slowdns() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_info "Starting uninstallation..."
         
-        # Stop service
         systemctl stop dnstt.service 2>/dev/null || true
-        
-        # Disable service
         systemctl disable dnstt.service 2>/dev/null || true
         
-        # Remove service
         rm -f /etc/systemd/system/dnstt.service
-        
-        # Remove configuration
         rm -f "$INFO_FILE"
         rm -rf "$DNSTT_DIR"
         
-        # Remove iptables rules
         iptables -D INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null || true
         iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         
-        # Remove sysctl config
         rm -f /etc/sysctl.d/99-slowdns-optimization.conf
         sysctl --system >/dev/null 2>&1
         
-        # Restore original SSH config if backup exists
         if ls /etc/ssh/sshd_config.backup.* 2>/dev/null; then
             latest_backup=$(ls -t /etc/ssh/sshd_config.backup.* | head -1)
             cp -f "$latest_backup" /etc/ssh/sshd_config
@@ -836,7 +787,7 @@ uninstall_slowdns() {
 }
 
 # -------------------------
-# Main Menu (BadVPN removed)
+# Main Menu
 # -------------------------
 main_menu() {
     while true; do
@@ -890,23 +841,17 @@ main_menu() {
 # Initialization
 # -------------------------
 init() {
-    # Check root
     is_root
     
-    # Create log file
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
     
-    # Create backup directory
     mkdir -p "$BACKUP_DIR"
     
-    # Clear screen
     clear
     
-    # Log script start
     log_info "SlowDNS Moded Panel started"
     
-    # Welcome message
     echo -e "${GREEN}"
     echo "╔══════════════════════════════════════════╗"
     echo "║    SLOWDNS MODED PANEL - REMASTERED      ║"
