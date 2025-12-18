@@ -25,9 +25,9 @@ apt -y install wget screen lsof iptables-persistent
 mkdir -p /root/dnstt && cd /root/dnstt
 
 # Download DNSTT server and keys
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server -O dnstt-server
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key -O server.key
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub -O server.pub
+wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/dnstt-server -O dnstt-server
+wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/server.key -O server.key
+wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/server.pub -O server.pub
 chmod +x dnstt-server
 
 # Ask for Nameserver
