@@ -22,4 +22,4 @@ Telegram: [https://t.me/esimfreegb](https://t.me/esimfreegb)
 You can quickly download and run the installer script with:
 
 ```bash
-rm -rf InstallerScript.sh && wget https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/moded-slowdns.sh -O moded-slowdns.sh && chmod +x moded-slowdns.sh && ./moded-slowdns.sh
+rm -rf moded-slowdns.sh && wget https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/moded-slowdns.sh -O moded-slowdns.sh && chmod +x moded-slowdns.sh && ./moded-slowdns.sh
