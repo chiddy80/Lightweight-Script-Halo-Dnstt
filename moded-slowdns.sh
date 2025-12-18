@@ -85,12 +85,13 @@ iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 iptables-save > /etc/iptables/rules.v4
 
 # Ask user if run in background or as systemd
-read -p "Run DNSTT in background (screen) or foreground service? (b/f): " run_mode
+read -p "Run DNSTT in background (screen) or as systemd service? (b/f): " run_mode
 
 if [ "$run_mode" = "b" ]; then
-    screen -dmS dnstt ./dnstt-server -udp :5300 -privkey-file server.key $ns 127.0.0.1:$target_port -mtu 512
+    screen -dmS dnstt ./dnstt-server -udp :5300 -mtu 512 -privkey-file server.key "$ns" 127.0.0.1:"$target_port"
     echo -e "${GREEN}DNSTT running in background screen.${NC}"
 else
+    # Create systemd service with hardcoded NS and target port
     cat >/etc/systemd/system/dnstt.service <<EOF
 [Unit]
 Description=DNSTT Tunnel Server
@@ -98,7 +99,7 @@ Wants=network.target
 After=network.target
 
 [Service]
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port -mtu 512
+ExecStart=/root/dnstt/dnstt-server -udp :5300 -mtu 512 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
 Restart=always
 RestartSec=3
 
