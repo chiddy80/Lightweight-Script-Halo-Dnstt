@@ -1,87 +1,138 @@
 #!/bin/bash
-set -e
 
-# ================= COLORS =================
-YELLOW='\033[1;33m'
-CYAN='\033[1;36m'
-NC='\033[0m'
+# Function to print colored output
+print_status() {
+    echo -e "[*] $1"
+}
 
-# ================= ROOT CHECK =================
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script must be run as root"
+# Function to check if command succeeded
+check_status() {
+    if [ $? -eq 0 ]; then
+        echo -e "[✓] Success"
+    else
+        echo -e "[✗] Failed"
+        exit 1
+    fi
+}
+
+print_status "Disabling UFW..."
+sudo ufw disable 2>/dev/null
+check_status
+
+if systemctl is-active --quiet ufw; then
+    print_status "Stopping UFW service..."
+    sudo systemctl stop ufw
+    check_status
+fi
+
+print_status "Disabling UFW from auto-start..."
+systemctl disable ufw 2>/dev/null
+check_status
+
+print_status "Disabling systemd-resolved..."
+if systemctl is-active --quiet systemd-resolved; then
+    systemctl stop systemd-resolved
+    check_status
+fi
+
+sudo systemctl disable systemd-resolved 2>/dev/null
+check_status
+
+if [ -L /etc/resolv.conf ]; then
+    print_status "Removing resolv.conf symlink..."
+    rm -f /etc/resolv.conf
+    check_status
+fi
+
+print_status "Creating new resolv.conf with Google DNS..."
+echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
+check_status
+
+print_status "Downloading SSLH fix script..."
+cd /usr/bin || exit 1
+wget -q -O sl-fix "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sl-fix"
+check_status
+
+sudo chmod +x sl-fix
+check_status
+
+print_status "Running SSLH fix..."
+sudo ./sl-fix
+check_status
+
+cd ~ || exit 1
+
+print_status "Configuring SSH..."
+echo "Port 22" | sudo tee -a /etc/ssh/sshd_config > /dev/null
+sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+check_status
+
+print_status "Setting up SlowDNS..."
+rm -rf /etc/slowdns
+mkdir -p /etc/slowdns
+chmod 777 /etc/slowdns
+
+print_status "Downloading SlowDNS files..."
+wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.key"
+check_status
+
+wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/server.pub"
+check_status
+
+wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns/sldns-server"
+check_status
+
+chmod +x /etc/slowdns/server.key /etc/slowdns/server.pub /etc/slowdns/sldns-server
+check_status
+
+cd ~ || exit 1
+
+print_status "Configuring SlowDNS service..."
+read -p "Enter nameserver: " NAMESERVER
+
+# Validate nameserver input
+if [ -z "$NAMESERVER" ]; then
+    echo "[!] Error: Nameserver cannot be empty!"
     exit 1
 fi
 
-clear
-echo -e "$CYAN"
-echo "=================================="
-echo "        DNSTT SERVER INSTALLER     "
-echo "=================================="
-echo -e "$NC"
-
-# ================= INSTALL PACKAGES =================
-apt update -y && apt upgrade -y
-echo -e "$YELLOW Installing required packages... $NC"
-apt install -y wget screen lsof iptables iptables-persistent
-
-# ================= FETCH DNSTT BIN & KEYS =================
-mkdir -p /root/dnstt
-cd /root/dnstt
-
-echo -e "$YELLOW Downloading DNSTT server and keys... $NC"
-
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key
-wget -q https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub
-
-chmod +x dnstt-server
-
-echo -e "$YELLOW"
-echo "==== PUBLIC KEY (COPY THIS) ===="
-cat server.pub
-echo "================================"
-echo -e "$NC"
-read -p "Press ENTER after copying the pubkey above"
-
-# ================= USER INPUT =================
-read -p "Enter your DNS domain (example: ns.yourdomain.com): " NS
-read -p "Enter target local port (example: SSH/WS/SSL): " TARGET_PORT
-
-# ================= IPTABLES =================
-echo -e "$YELLOW Configuring iptables rules... $NC"
-iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-
-# Save iptables rules
-iptables-save > /etc/iptables/rules.v4
-echo -e "$YELLOW Iptables rules saved. $NC"
-
-# ================= SYSTEMD SERVICE =================
-cat >/etc/systemd/system/dnstt.service <<EOF
+# Create service file
+tee /etc/systemd/system/server-sldns.service > /dev/null << EOF
 [Unit]
-Description=DNSTT Tunnel Server
+Description=SlowDNS Server esimfreegb
 After=network.target
 
 [Service]
-ExecStart=/root/dnstt/dnstt-server -udp :5300 -privkey-file /root/dnstt/server.key $NS 127.0.0.1:$TARGET_PORT
+Type=simple
+ExecStart=/etc/slowdns/sldns-server -udp :53 -mtu 1800 -privkey-file /etc/slowdns/server.key $NAMESERVER 127.0.0.1:22
 Restart=always
-RestartSec=3
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+chmod 644 /etc/systemd/system/server-sldns.service
+
+print_status "Setting up SlowDNS service..."
+pkill sldns-server 2>/dev/null
 systemctl daemon-reload
-systemctl enable dnstt
-systemctl start dnstt
+check_status
 
-echo -e "$CYAN"
-echo "=================================="
-echo "   DNSTT INSTALLED SUCCESSFULLY"
-echo "   UDP 53 → 5300"
-echo "   DNS Domain : $NS"
-echo "   Forward to : 127.0.0.1:$TARGET_PORT"
-echo "=================================="
-echo -e "$NC"
+print_status "Starting SlowDNS service..."
+systemctl stop server-sldns 2>/dev/null
+systemctl enable server-sldns
+systemctl start server-sldns
+systemctl restart server-sldns
+check_status
 
-lsof -i :5300
+print_status "Removing password complexity module..."
+sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
+
+echo ""
+echo "========================================"
+echo "Setup completed successfully!"
+echo "========================================"
+echo ""
+echo "Checking service status..."
+sudo systemctl status server-sldns --no-pager -l
