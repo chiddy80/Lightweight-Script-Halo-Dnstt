@@ -1,118 +1,526 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Color codes
-YELLOW='\033[1;33m'
-CYAN='\033[1;36m'
-GREEN='\033[1;32m'
-RED='\033[1;31m'
-NC='\033[0m'
+# ===================================================
+# Professional SlowDNS/DNSTT Server Installer
+# ===================================================
 
-# Check root
-if [ "$(whoami)" != "root" ]; then
-    echo -e "${RED}Error: This script must be run as root.${NC}"
-    exit 1
+set -euo pipefail
+shopt -s inherit_errexit 2>/dev/null || true
+
+# ============== CONFIGURATION ==============
+readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+readonly SCRIPT_VERSION="2.0"
+readonly SLOWDNS_DIR="/etc/slowdns"
+readonly BACKUP_DIR="/etc/slowdns/backups"
+readonly REPO_BASE_URL="https://raw.githubusercontent.com/athumani2580/DNS/main/slowdns"
+readonly DEFAULT_DNS=("8.8.8.8" "8.8.4.4")
+readonly DEFAULT_TCP_PORT=22
+
+# ============== COLOR OUTPUT ==============
+if [[ -t 1 ]]; then
+    readonly RED='\033[1;31m'
+    readonly GREEN='\033[1;32m'
+    readonly YELLOW='\033[1;33m'
+    readonly BLUE='\033[1;34m'
+    readonly MAGENTA='\033[1;35m'
+    readonly CYAN='\033[1;36m'
+    readonly WHITE='\033[1;37m'
+    readonly BOLD='\033[1m'
+    readonly NC='\033[0m'
+else
+    readonly RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' WHITE='' BOLD='' NC=''
 fi
 
-# Function to check if input is a number
-is_number() {
-    [[ $1 =~ ^[0-9]+$ ]]
+# ============== LOGGING FUNCTIONS ==============
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    case "$level" in
+        "SUCCESS") echo -e "${GREEN}[✓]${NC} $timestamp $message" ;;
+        "INFO") echo -e "${BLUE}[i]${NC} $timestamp $message" ;;
+        "WARN") echo -e "${YELLOW}[!]${NC} $timestamp $message" >&2 ;;
+        "ERROR") echo -e "${RED}[✗]${NC} $timestamp $message" >&2 ;;
+        "DEBUG") [[ "${DEBUG:-false}" == "true" ]] && echo -e "${CYAN}[*]${NC} $timestamp $message" ;;
+    esac
 }
 
-# Clear screen and show banner
-clear
-echo -e "${CYAN}=== DNSTT Protocol Installer ===${NC}"
-echo -e "${YELLOW}VPN Tunnel Installer by AhmedSCRIPT Hacker${NC}"
-echo -e "${GREEN}Version: 4.8${NC}"
-echo ""
+log_success() { log "SUCCESS" "$1"; }
+log_info() { log "INFO" "$1"; }
+log_warn() { log "WARN" "$1"; }
+log_error() { log "ERROR" "$1"; exit 1; }
+log_debug() { log "DEBUG" "$1"; }
 
-# Menu (only DNSTT)
-echo "1. Install DNSTT, DoH and DoT"
-echo "0. Exit"
-selected_option=-1
-while [ $selected_option -lt 0 ] || [ $selected_option -gt 1 ]; do
-    echo -e "${YELLOW}Select a number (0-1):${NC}"
-    read input
-    if [[ $input =~ ^[0-9]+$ ]]; then
-        selected_option=$input
-    else
-        echo -e "${RED}Invalid input. Please enter a number.${NC}"
+# ============== UTILITY FUNCTIONS ==============
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root. Use sudo or run as root user."
     fi
-done
+}
 
-if [ "$selected_option" -eq 0 ]; then
-    echo "Exiting..."
-    exit 0
-fi
-
-# -----------------------------
-# DNSTT Install
-# -----------------------------
-echo -e "${YELLOW}Installing DNSTT...${NC}"
-
-apt update && apt upgrade -y
-apt install -y wget screen lsof iptables-persistent
-
-# Prepare directories
-rm -rf /root/dnstt
-mkdir -p /root/dnstt
-cd /root/dnstt
-
-# Download DNSTT binaries and keys
-wget -O dnstt-server https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server
-wget -O server.key https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key
-wget -O server.pub https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub
-chmod +x dnstt-server
-
-# Show pubkey to user
-echo -e "${CYAN}Your DNSTT Public Key:${NC}"
-cat server.pub
-read -p "Copy the pubkey above and press Enter when done"
-
-# Ask for NS and target port
-read -p "Enter your Nameserver (NS): " ns
-while true; do
-    read -p "Enter target TCP port (e.g., 22 for SSH): " target_port
-    if is_number "$target_port" && [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ]; then
-        break
-    else
-        echo -e "${RED}Invalid input. Enter a number 1-65535.${NC}"
+check_dependencies() {
+    local deps=("wget" "curl" "systemctl" "iptables" "lsof")
+    local missing=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_warn "Missing dependencies: ${missing[*]}"
+        return 1
     fi
-done
+    return 0
+}
 
-# Configure iptables
-iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-iptables-save > /etc/iptables/rules.v4
+backup_file() {
+    local file="$1"
+    local backup_path="$BACKUP_DIR/$(basename "$file").$(date +%Y%m%d_%H%M%S).bak"
+    
+    mkdir -p "$BACKUP_DIR"
+    if [[ -f "$file" ]]; then
+        cp "$file" "$backup_path"
+        log_debug "Backed up $file to $backup_path"
+    fi
+}
 
-# Ask user if run in background or as systemd
-read -p "Run DNSTT in background (screen) or as systemd service? (b/f): " run_mode
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
+}
 
-if [ "$run_mode" = "b" ]; then
-    screen -dmS dnstt ./dnstt-server -udp :5300 -mtu 512 -privkey-file server.key "$ns" 127.0.0.1:"$target_port"
-    echo -e "${GREEN}DNSTT running in background screen.${NC}"
-else
-    # Create systemd service with hardcoded NS and target port
-    cat >/etc/systemd/system/dnstt.service <<EOF
+validate_nameserver() {
+    local ns="$1"
+    [[ "$ns" =~ ^[a-zA-Z0-9.-]+$ ]] && [[ ${#ns} -le 253 ]]
+}
+
+get_system_info() {
+    log_info "System Information:"
+    log_info "  OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')"
+    log_info "  Kernel: $(uname -r)"
+    log_info "  Architecture: $(uname -m)"
+    log_info "  Hostname: $(hostname -f)"
+}
+
+# ============== NETWORK CONFIGURATION ==============
+configure_network() {
+    log_info "Configuring network settings..."
+    
+    # Disable UFW if present
+    if systemctl is-enabled ufw 2>/dev/null; then
+        log_info "Disabling UFW firewall..."
+        systemctl stop ufw 2>/dev/null
+        systemctl disable ufw 2>/dev/null
+        ufw --force disable 2>/dev/null
+    fi
+    
+    # Handle systemd-resolved
+    if systemctl is-active --quiet systemd-resolved; then
+        log_info "Stopping systemd-resolved..."
+        systemctl stop systemd-resolved
+        systemctl disable systemd-resolved
+    fi
+    
+    # Configure resolv.conf
+    backup_file "/etc/resolv.conf"
+    if [[ -L "/etc/resolv.conf" ]]; then
+        rm -f "/etc/resolv.conf"
+    fi
+    
+    log_info "Setting DNS servers to ${DEFAULT_DNS[*]}..."
+    cat > "/etc/resolv.conf" << EOF
+# Generated by $SCRIPT_NAME
+# $(date)
+
+$(for dns in "${DEFAULT_DNS[@]}"; do echo "nameserver $dns"; done)
+
+options edns0 trust-ad
+search .
+EOF
+    chmod 644 "/etc/resolv.conf"
+    log_success "Network configuration completed"
+}
+
+configure_ssh() {
+    log_info "Configuring SSH server for optimal performance..."
+    backup_file "/etc/ssh/sshd_config"
+    
+    # Create SSH config backup
+    cp -f /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    
+    # Enable TCP forwarding
+    sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+    
+    # Remove existing configurations to avoid duplicates
+    sed -i '/^KexAlgorithms/d;/^Ciphers/d;/^MACs/d' /etc/ssh/sshd_config
+    
+    # Append optimized SSH configuration
+    cat >> /etc/ssh/sshd_config << 'EOF'
+
+# ======================
+# SlowDNS Optimized SSH
+# ======================
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+
+# Performance tweaks
+TCPKeepAlive yes
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Compression no
+MaxStartups 10:30:60
+MaxSessions 100
+EOF
+    
+    # Restart SSH service
+    if systemctl restart ssh; then
+        log_success "SSH configuration applied successfully"
+    else
+        log_warn "SSH restart failed, but configuration was saved"
+    fi
+}
+
+configure_iptables() {
+    local target_port="$1"
+    
+    log_info "Configuring iptables rules..."
+    
+    # Flush existing chains (be careful in production!)
+    iptables -F INPUT
+    iptables -F FORWARD
+    iptables -t nat -F PREROUTING
+    
+    # Basic security rules
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT ACCEPT
+    
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    
+    # Allow established connections
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    
+    # Allow SSH
+    iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+    
+    # Allow SlowDNS ports
+    iptables -A INPUT -p udp --dport 53 -m conntrack --ctstate NEW -j ACCEPT
+    iptables -A INPUT -p tcp --dport "${target_port}" -m conntrack --ctstate NEW -j ACCEPT
+    
+    # DNAT rule for DNS redirection
+    iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+    
+    # Save rules
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save
+    else
+        iptables-save > /etc/iptables/rules.v4
+        ip6tables-save > /etc/iptables/rules.v6
+    fi
+    
+    log_success "iptables configuration completed"
+}
+
+# ============== SLOWDNS INSTALLATION ==============
+install_slowdns() {
+    local nameserver="$1"
+    local target_port="$2"
+    
+    log_info "Installing SlowDNS server..."
+    
+    # Create directory structure
+    rm -rf "$SLOWDNS_DIR"
+    mkdir -p "$SLOWDNS_DIR" "$BACKUP_DIR"
+    chmod 750 "$SLOWDNS_DIR"
+    cd "$SLOWDNS_DIR" || log_error "Failed to enter SlowDNS directory"
+    
+    # Download files
+    log_info "Downloading SlowDNS components..."
+    local files=("server.key" "server.pub" "sldns-server")
+    
+    for file in "${files[@]}"; do
+        local url="${REPO_BASE_URL}/${file}"
+        log_info "Downloading: $file"
+        
+        if ! wget -q --timeout=30 --tries=3 -O "$file" "$url"; then
+            log_error "Failed to download $file from $url"
+        fi
+        
+        if [[ ! -s "$file" ]]; then
+            log_error "Downloaded file $file is empty"
+        fi
+    done
+    
+    # Set permissions
+    chmod 600 server.key
+    chmod 644 server.pub
+    chmod 755 sldns-server
+    
+    # Verify binary
+    if ! file sldns-server | grep -q "ELF"; then
+        log_error "Downloaded binary is not a valid ELF executable"
+    fi
+    
+    # Display public key
+    log_success "SlowDNS files downloaded successfully"
+    echo -e "${CYAN}${BOLD}=== Your DNSTT Public Key ===${NC}"
+    echo ""
+    cat server.pub
+    echo ""
+    echo -e "${CYAN}${BOLD}================================${NC}"
+    echo ""
+    
+    read -p "Press Enter after copying the public key above..."
+    
+    create_systemd_service "$nameserver" "$target_port"
+}
+
+create_systemd_service() {
+    local nameserver="$1"
+    local target_port="$2"
+    
+    log_info "Creating systemd service..."
+    
+    cat > /etc/systemd/server-sldns.service << EOF
 [Unit]
-Description=DNSTT Tunnel Server
-Wants=network.target
-After=network.target
+Description=SlowDNS Server (DNS-over-TCP Tunneling)
+Documentation=https://github.com/esimfreegb/DNS
+After=network-online.target
+Wants=network-online.target
+Requires=network.target
 
 [Service]
-ExecStart=/root/dnstt/dnstt-server -udp :53 -mtu 1800 -privkey-file /root/dnstt/server.key $ns 127.0.0.1:$target_port
-Restart=always
-RestartSec=3
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/etc/slowdns
+ExecStart=/etc/slowdns/sldns-server \\
+    -udp :5300 \\
+    -mtu 512 \\
+    -privkey-file /etc/slowdns/server.key \\
+    ${nameserver} \\
+    127.0.0.1:${target_port}
+    
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+LimitMEMLOCK=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slowdns
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
+    
     systemctl daemon-reload
-    systemctl enable dnstt
-    systemctl start dnstt
-    echo -e "${GREEN}DNSTT running as systemd service.${NC}"
+    systemctl enable server-sldns.service --now
+    
+    # Wait for service to start
+    sleep 2
+    
+    if systemctl is-active --quiet server-sldns.service; then
+        log_success "SlowDNS service is running"
+    else
+        log_error "Failed to start SlowDNS service"
+    fi
+}
+
+# ============== MONITORING & STATUS ==============
+show_status() {
+    echo -e "${CYAN}${BOLD}=== SlowDNS Server Status ===${NC}"
+    echo ""
+    
+    # Service status
+    log_info "Service Status:"
+    systemctl status server-sldns.service --no-pager -l
+    
+    # Port monitoring
+    log_info "Network Ports:"
+    echo -e "Port 53 (UDP): $(ss -ulpn sport = :53 2>/dev/null | grep -c LISTEN || echo "Not listening")"
+    echo -e "Port ${TARGET_PORT:-22} (TCP): $(ss -tlnp sport = :${TARGET_PORT:-22} 2>/dev/null | grep -c LISTEN || echo "Not listening")"
+    
+    # Process info
+    log_info "Process Information:"
+    if pgrep sldns-server >/dev/null; then
+        ps aux | grep -E "sldns-server|PID" | head -2
+    else
+        echo "SlowDNS process not running"
+    fi
+    
+    # Connection stats
+    log_info "Connection Statistics:"
+    ss -s | grep -A1 "Total:"
+    
+    # Resource usage
+    log_info "Resource Usage:"
+    systemd-cgtop -n1 -b | grep slowdns 2>/dev/null || echo "No resource data available"
+}
+
+create_uninstall_script() {
+    cat > "$SLOWDNS_DIR/uninstall.sh" << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+echo "=== SlowDNS Uninstaller ==="
+read -p "Are you sure you want to uninstall SlowDNS? [y/N]: " -n 1 -r
+echo
+
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Uninstall cancelled."
+    exit 0
 fi
 
-# Show status
-lsof -i :5300
-echo -e "${CYAN}DNSTT installation completed.${NC}"
+echo "Stopping SlowDNS service..."
+systemctl stop server-sldns.service 2>/dev/null || true
+systemctl disable server-sldns.service 2>/dev/null || true
+rm -f /etc/systemd/system/server-sldns.service
+
+echo "Removing iptables rules..."
+iptables -D INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || true
+iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+
+echo "Cleaning up files..."
+rm -rf /etc/slowdns
+
+echo "Reloading systemd..."
+systemctl daemon-reload
+
+echo "SlowDNS has been successfully uninstalled."
+EOF
+    
+    chmod +x "$SLOWDNS_DIR/uninstall.sh"
+    log_info "Uninstall script created: $SLOWDNS_DIR/uninstall.sh"
+}
+
+# ============== MAIN EXECUTION ==============
+main() {
+    # Clear screen and show header
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║           Professional SlowDNS Server Installer          ║"
+    echo "║                   Version $SCRIPT_VERSION                     ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    # Initial checks
+    require_root
+    check_dependencies
+    get_system_info
+    
+    # User confirmation
+    echo -e "${YELLOW}This script will:${NC}"
+    echo "  • Configure network settings"
+    echo "  • Install and configure SlowDNS"
+    echo "  • Set up iptables firewall rules"
+    echo "  • Create systemd service"
+    echo ""
+    read -p "Do you want to continue? [Y/n]: " -n 1 -r
+    echo
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n "$REPLY" ]]; then
+        log_info "Installation cancelled by user"
+        exit 0
+    fi
+    
+    # Configuration
+    configure_network
+    configure_ssh
+    
+    # Get user input
+    echo ""
+    echo -e "${CYAN}=== Configuration ===${NC}"
+    
+    local nameserver
+    while true; do
+        read -p "Enter your Nameserver (NS domain): " nameserver
+        if validate_nameserver "$nameserver"; then
+            break
+        else
+            log_warn "Invalid nameserver format. Use only letters, numbers, dots, and hyphens."
+        fi
+    done
+    
+    local target_port
+    while true; do
+        read -p "Enter target TCP port [${DEFAULT_TCP_PORT}]: " target_port
+        target_port=${target_port:-$DEFAULT_TCP_PORT}
+        if validate_port "$target_port"; then
+            break
+        else
+            log_warn "Invalid port number. Must be between 1 and 65535."
+        fi
+    done
+    
+    # Installation
+    configure_iptables "$target_port"
+    install_slowdns "$nameserver" "$target_port"
+    
+    # Final steps
+    create_uninstall_script
+    show_status
+    
+    # Installation complete
+    echo ""
+    echo -e "${GREEN}${BOLD}=== Installation Complete! ===${NC}"
+    echo ""
+    echo -e "${GREEN}SlowDNS server is now running.${NC}"
+    echo ""
+    echo -e "${YELLOW}Important Information:${NC}"
+    echo -e "  • Public Key: $(cat /etc/slowdns/server.pub 2>/dev/null | tr -d '\n')"
+    echo -e "  • Nameserver: $nameserver"
+    echo -e "  • Target Port: $target_port"
+    echo -e "  • Service Status: systemctl status server-sldns"
+    echo -e "  • Uninstall: /etc/slowdns/uninstall.sh"
+    echo ""
+    echo -e "${CYAN}To test your setup, use:${NC}"
+    echo -e "  dig @$(hostname -I | awk '{print $1}') $nameserver"
+    echo ""
+    log_success "Installation completed successfully at $(date)"
+}
+
+# Cleanup on exit
+cleanup() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "Script failed with exit code $exit_code"
+    fi
+}
+
+trap cleanup EXIT
+
+# Run main function
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"Tunnelingnelingneling
