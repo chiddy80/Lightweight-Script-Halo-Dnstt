@@ -60,7 +60,7 @@ net.ipv4.udp_mem=8388608 12582912 16777216
 net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 EOF
-sysctl --system >/dev/null
+    sysctl --system >/dev/null
 }
 
 # -------------------------
@@ -119,8 +119,8 @@ delete_ssh_user() {
 # Install SlowDNS
 # -------------------------
 install_slowdns() {
-    apt update -y >/dev/null
-    apt install -y wget curl screen iptables-persistent >/dev/null
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y wget curl screen iptables-persistent >/dev/null 2>&1
 
     mkdir -p /root/dnstt
     cd /root/dnstt || exit
