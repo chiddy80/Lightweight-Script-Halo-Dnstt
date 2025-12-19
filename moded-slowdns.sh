@@ -15,6 +15,94 @@ check_status() {
     fi
 }
 
+# ====================== NEW ADDITIONS ======================
+print_status "Setting up SSLH multiplexer..."
+
+# Install SSLH if not installed
+if ! command -v sslh &> /dev/null; then
+    print_status "Installing SSLH..."
+    apt-get update
+    apt-get install -y sslh
+    check_status
+fi
+
+# Configure SSLH to handle multiple protocols
+print_status "Configuring SSLH..."
+cat > /etc/default/sslh <<EOF
+# Default options for sslh initscript
+# sourced by /etc/init.d/sslh
+
+# Disable ipv6?
+DISABLE_IPV6=1
+
+# Change this to your user and group
+RUN=root
+
+#DAEMON=/usr/sbin/sslh
+
+# What to listen to (can be multiple addresses)
+# Here: listen to incoming HTTPS (443) and SSH (22) connections
+LISTEN_IP=0.0.0.0
+LISTEN_PORT=443
+
+# outgoing connections appear from this ip
+#SOURCE_IP=0.0.0.0
+
+# Add other options here (see sslh(8) for more options)
+DAEMON_OPTS="--user root --transparent --on-timeout ssl --timeout 3 --listen \$LISTEN_IP:\$LISTEN_PORT \
+--ssh 127.0.0.1:22 \
+--ssl 127.0.0.1:4443 \
+--openvpn 127.0.0.1:1194 \
+--anyprot 127.0.0.1:2222"
+EOF
+
+print_status "Configuring rc.local for auto-start..."
+cat > /etc/rc.local <<-END
+#!/bin/sh -e
+# rc.local
+# By default this script does nothing.
+
+# Auto-start SSLH
+systemctl start sslh
+
+# Auto-start BadVPN UDPGW (for gaming/streaming)
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7100 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7200 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500
+
+# Redirect DNS traffic to SlowDNS
+iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+
+# Enable SSLH transparent mode rules
+iptables -t mangle -N SSLH
+iptables -t mangle -A OUTPUT --protocol tcp --out-interface lo --sport 443 --jump SSLH
+iptables -t mangle -A SSLH --jump MARK --set-mark 0x1
+iptables -t mangle -A SSLH --jump ACCEPT
+
+ip rule add fwmark 0x1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+
+exit 0
+END
+
+# Make rc.local executable
+chmod +x /etc/rc.local
+
+# Enable rc-local service
+systemctl enable rc-local
+systemctl start rc-local.service
+
+# Disable IPv6
+echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
+sed -i '$ i\echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6' /etc/rc.local
+
+print_status "Starting SSLH service..."
+systemctl enable sslh
+systemctl start sslh
+check_status
+# ====================== END NEW ADDITIONS ======================
+
 print_status "Disabling UFW..."
 sudo ufw disable 2>/dev/null
 check_status
@@ -145,6 +233,36 @@ EOF
     echo "Tunnel $i: UDP:$UDP_PORT → SSH:$SSH_PORT"
 done
 
+# ====================== ADDITIONAL FIXES ======================
+print_status "Setting up SSLH fix for reboot issues..."
+
+# Download and install the SSLH fix script
+cd /usr/bin || exit 1
+wget -q -O sl-fix "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sl-fix"
+chmod +x sl-fix
+
+# Download the SSLH fix reboot script
+wget -q -O sslh-fix-reboot "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sslh-fix-reboot.sh"
+chmod +x sslh-fix-reboot
+
+cd ~ || exit 1
+
+# Install BadVPN for UDP gaming/streaming
+print_status "Installing BadVPN UDPGW..."
+wget -q -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+chmod +x /usr/bin/badvpn-udpgw
+check_status
+
+# Add iptables rules for DNS redirection
+print_status "Setting iptables rules for DNS..."
+iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+
+# Save iptables rules
+apt-get install -y iptables-persistent
+iptables-save > /etc/iptables/rules.v4
+# ====================== END ADDITIONAL FIXES ======================
+
 print_status "Setting firewall rules..."
 # Allow all UDP ports for SlowDNS
 for ((i=1; i<=NUM_TUNNELS; i++)); do
@@ -157,8 +275,15 @@ for port in $SSH_PORTS; do
     ufw allow $port/tcp 2>/dev/null
 done
 
+# Allow SSLH port
+ufw allow 443/tcp 2>/dev/null
+
 print_status "Removing password complexity module..."
 sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
+
+print_status "Running final SSLH fix..."
+/usr/bin/sslh-fix-reboot
+check_status
 
 echo ""
 echo "========================================"
@@ -182,9 +307,16 @@ echo "Nameserver: $NAMESERVER"
 echo "Public Key:"
 cat /etc/slowdns/server.pub
 echo ""
+echo "SSLH is running on port 443 (handles SSH/SSL/OpenVPN)"
+echo "SlowDNS is running on UDP ports 5300-53XX"
+echo ""
 echo "Checking service status..."
 for ((i=1; i<=NUM_TUNNELS; i++)); do
     echo ""
     echo "=== Tunnel $i Status ==="
     systemctl status server-sldns-$i --no-pager -l | head -10
 done
+
+echo ""
+echo "=== SSLH Status ==="
+systemctl status sslh --no-pager -l | head -10
