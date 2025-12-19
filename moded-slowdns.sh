@@ -48,18 +48,6 @@ print_status "Creating new resolv.conf with Google DNS..."
 echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
 check_status
 
-print_status "Downloading SSLH fix script..."
-cd /usr/bin || exit 1
-wget -q -O sl-fix "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sl-fix"
-check_status
-
-sudo chmod +x sl-fix
-check_status
-
-print_status "Running SSLH fix..."
-sudo ./sl-fix
-check_status
-
 cd ~ || exit 1
 
 print_status "Configuring SSH..."
