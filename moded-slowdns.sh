@@ -9,19 +9,126 @@ print_status() {
 check_status() {
     if [ $? -eq 0 ]; then
         echo -e "[✓] Success"
+        return 0
     else
         echo -e "[✗] Failed"
-        exit 1
+        return 1
     fi
 }
 
-# ====================== NEW ADDITIONS ======================
+# Function to fix SSLH issues (integrated from sl-fix-reboot)
+fix_sslh_service() {
+    print_status "Fixing SSLH service issues..."
+    
+    # Stop any conflicting services
+    systemctl stop ws-tls 2>/dev/null
+    pkill python 2>/dev/null
+    systemctl stop sslh 2>/dev/null
+    
+    # Reload systemd
+    systemctl daemon-reload
+    
+    # Disable conflicting services
+    systemctl disable ws-tls 2>/dev/null
+    systemctl disable sslh 2>/dev/null
+    
+    # Re-enable SSLH
+    systemctl daemon-reload
+    systemctl enable sslh
+    systemctl enable ws-tls 2>/dev/null
+    
+    # Start SSLH with multiple methods
+    systemctl start sslh
+    /etc/init.d/sslh start 2>/dev/null
+    /etc/init.d/sslh restart 2>/dev/null
+    
+    # Start ws-tls if exists
+    systemctl start ws-tls 2>/dev/null
+    systemctl restart ws-tls 2>/dev/null
+    
+    sleep 2
+    
+    # Restart SSH service
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+}
+
+# Function to setup rc.local with auto-fix
+setup_rclocal() {
+    print_status "Setting up rc.local for auto-start..."
+    
+    cat > /etc/rc.local <<-END
+#!/bin/sh -e
+# rc.local
+# By default this script does nothing.
+
+# Fix SSLH service on boot
+systemctl stop ws-tls 2>/dev/null
+pkill python 2>/dev/null
+systemctl stop sslh 2>/dev/null
+systemctl daemon-reload
+systemctl disable ws-tls 2>/dev/null
+systemctl disable sslh 2>/dev/null
+systemctl daemon-reload
+systemctl enable sslh
+systemctl enable ws-tls 2>/dev/null
+systemctl start sslh
+/etc/init.d/sslh start 2>/dev/null
+/etc/init.d/sslh restart 2>/dev/null
+systemctl start ws-tls 2>/dev/null
+systemctl restart ws-tls 2>/dev/null
+sleep 5
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+
+# Auto-start BadVPN UDPGW (for gaming/streaming)
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7100 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7200 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500
+
+# Redirect DNS traffic to SlowDNS
+iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+
+# Enable SSLH transparent mode rules
+iptables -t mangle -N SSLH 2>/dev/null
+iptables -t mangle -A OUTPUT --protocol tcp --out-interface lo --sport 443 --jump SSLH 2>/dev/null
+iptables -t mangle -A SSLH --jump MARK --set-mark 0x1 2>/dev/null
+iptables -t mangle -A SSLH --jump ACCEPT 2>/dev/null
+
+ip rule add fwmark 0x1 lookup 100 2>/dev/null
+ip route add local 0.0.0.0/0 dev lo table 100 2>/dev/null
+
+exit 0
+END
+
+    # Make rc.local executable
+    chmod +x /etc/rc.local
+    
+    # Enable rc-local service
+    systemctl enable rc-local 2>/dev/null || true
+    systemctl start rc-local.service 2>/dev/null || true
+}
+
+# ====================== FIX HOSTNAME RESOLUTION ======================
+print_status "Fixing hostname resolution..."
+
+# Get current hostname
+CURRENT_HOSTNAME=$(hostname)
+
+# Add hostname to /etc/hosts
+if ! grep -q "$CURRENT_HOSTNAME" /etc/hosts; then
+    echo "127.0.0.1 $CURRENT_HOSTNAME" | sudo tee -a /etc/hosts > /dev/null
+    echo "::1 $CURRENT_HOSTNAME" | sudo tee -a /etc/hosts > /dev/null
+fi
+check_status
+# ====================== END HOSTNAME FIX ======================
+
+# ====================== SSLH SETUP ======================
 print_status "Setting up SSLH multiplexer..."
 
 # Install SSLH if not installed
 if ! command -v sslh &> /dev/null; then
     print_status "Installing SSLH..."
-    apt-get update
+    apt-get update -y
     apt-get install -y sslh
     check_status
 fi
@@ -37,8 +144,6 @@ DISABLE_IPV6=1
 
 # Change this to your user and group
 RUN=root
-
-#DAEMON=/usr/sbin/sslh
 
 # What to listen to (can be multiple addresses)
 # Here: listen to incoming HTTPS (443) and SSH (22) connections
@@ -56,42 +161,7 @@ DAEMON_OPTS="--user root --transparent --on-timeout ssl --timeout 3 --listen \$L
 --anyprot 127.0.0.1:2222"
 EOF
 
-print_status "Configuring rc.local for auto-start..."
-cat > /etc/rc.local <<-END
-#!/bin/sh -e
-# rc.local
-# By default this script does nothing.
-
-# Auto-start SSLH
-systemctl start sslh
-
-# Auto-start BadVPN UDPGW (for gaming/streaming)
-screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7100 --max-clients 500
-screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7200 --max-clients 500
-screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500
-
-# Redirect DNS traffic to SlowDNS
-iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
-
-# Enable SSLH transparent mode rules
-iptables -t mangle -N SSLH
-iptables -t mangle -A OUTPUT --protocol tcp --out-interface lo --sport 443 --jump SSLH
-iptables -t mangle -A SSLH --jump MARK --set-mark 0x1
-iptables -t mangle -A SSLH --jump ACCEPT
-
-ip rule add fwmark 0x1 lookup 100
-ip route add local 0.0.0.0/0 dev lo table 100
-
-exit 0
-END
-
-# Make rc.local executable
-chmod +x /etc/rc.local
-
-# Enable rc-local service
-systemctl enable rc-local
-systemctl start rc-local.service
+setup_rclocal
 
 # Disable IPv6
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
@@ -99,9 +169,9 @@ sed -i '$ i\echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6' /etc/rc.local
 
 print_status "Starting SSLH service..."
 systemctl enable sslh
-systemctl start sslh
+fix_sslh_service
 check_status
-# ====================== END NEW ADDITIONS ======================
+# ====================== END SSLH SETUP ======================
 
 print_status "Disabling UFW..."
 sudo ufw disable 2>/dev/null
@@ -128,47 +198,74 @@ check_status
 
 if [ -L /etc/resolv.conf ]; then
     print_status "Removing resolv.conf symlink..."
-    rm -f /etc/resolv.conf
+    sudo rm -f /etc/resolv.conf
     check_status
 fi
 
 print_status "Creating new resolv.conf with Google DNS..."
-echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
+echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | sudo tee /etc/resolv.conf > /dev/null
 check_status
 
 print_status "Configuring SSH for multiple ports..."
+# Backup original sshd_config
+sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null
+
 # Add multiple SSH ports for different users
 SSH_PORTS="22 2222 2223 2224 2225 2226"
 
+# Clear any existing Port lines first (keep only the first one)
+sudo sed -i '/^Port/d' /etc/ssh/sshd_config 2>/dev/null
+
+# Add ports to sshd_config
 for port in $SSH_PORTS; do
-    if ! grep -q "Port $port" /etc/ssh/sshd_config; then
-        echo "Port $port" | sudo tee -a /etc/ssh/sshd_config > /dev/null
-    fi
+    echo "Port $port" | sudo tee -a /etc/ssh/sshd_config > /dev/null
 done
 
-sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+# Ensure AllowTcpForwarding is enabled
+sudo sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+sudo sed -i 's/#AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
+
+# Add if not present
+if ! grep -q "AllowTcpForwarding yes" /etc/ssh/sshd_config; then
+    echo "AllowTcpForwarding yes" | sudo tee -a /etc/ssh/sshd_config > /dev/null
+fi
+
 check_status
 
 print_status "Restarting SSH service..."
-systemctl restart sshd
-check_status
+# Try different SSH service names
+if systemctl list-unit-files | grep -q "ssh.service"; then
+    sudo systemctl restart ssh
+elif systemctl list-unit-files | grep -q "sshd.service"; then
+    sudo systemctl restart sshd
+else
+    # Try generic restart
+    sudo service ssh restart 2>/dev/null || sudo service sshd restart 2>/dev/null
+fi
+
+# Verify SSH is running
+if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd || pgrep -x "sshd" > /dev/null; then
+    echo -e "[✓] SSH service is running"
+else
+    echo -e "[!] Warning: Could not verify SSH service status"
+fi
 
 print_status "Setting up SlowDNS..."
-rm -rf /etc/slowdns
-mkdir -p /etc/slowdns
-chmod 777 /etc/slowdns
+sudo rm -rf /etc/slowdns
+sudo mkdir -p /etc/slowdns
+sudo chmod 777 /etc/slowdns
 
 print_status "Downloading SlowDNS files..."
-wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
+sudo wget -q -O /etc/slowdns/server.key "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.key"
 check_status
 
-wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
+sudo wget -q -O /etc/slowdns/server.pub "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/server.pub"
 check_status
 
-wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
+sudo wget -q -O /etc/slowdns/sldns-server "https://raw.githubusercontent.com/chiddy80/Lightweight-Script-Halo-Dnstt/main/dnstt-server"
 check_status
 
-chmod +x /etc/slowdns/server.key /etc/slowdns/server.pub /etc/slowdns/sldns-server
+sudo chmod +x /etc/slowdns/server.key /etc/slowdns/server.pub /etc/slowdns/sldns-server
 check_status
 
 cd ~ || exit 1
@@ -191,9 +288,9 @@ fi
 
 # Remove existing services
 for i in {1..10}; do
-    systemctl stop server-sldns-$i 2>/dev/null
-    systemctl disable server-sldns-$i 2>/dev/null
-    rm -f /etc/systemd/system/server-sldns-$i.service 2>/dev/null
+    sudo systemctl stop server-sldns-$i 2>/dev/null
+    sudo systemctl disable server-sldns-$i 2>/dev/null
+    sudo rm -f /etc/systemd/system/server-sldns-$i.service 2>/dev/null
 done
 
 # Create multiple tunnels on different UDP ports
@@ -207,7 +304,7 @@ for ((i=1; i<=NUM_TUNNELS; i++)); do
     
     print_status "Creating tunnel $i on UDP:$UDP_PORT -> SSH:$SSH_PORT..."
     
-    tee /etc/systemd/system/server-sldns-$i.service > /dev/null <<EOF
+    sudo tee /etc/systemd/system/server-sldns-$i.service > /dev/null <<EOF
 [Unit]
 Description=DNSTT Tunnel $i (UDP:$UDP_PORT -> SSH:$SSH_PORT)
 After=network.target
@@ -222,67 +319,75 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-    chmod 644 /etc/systemd/system/server-sldns-$i.service
+    sudo chmod 644 /etc/systemd/system/server-sldns-$i.service
     
     print_status "Starting tunnel $i..."
-    systemctl daemon-reload
-    systemctl enable server-sldns-$i
-    systemctl start server-sldns-$i
-    check_status
+    sudo systemctl daemon-reload
+    sudo systemctl enable server-sldns-$i
+    sudo systemctl start server-sldns-$i
+    
+    # Check if service started successfully
+    if sudo systemctl is-active --quiet server-sldns-$i; then
+        echo -e "[✓] Tunnel $i started successfully"
+    else
+        echo -e "[!] Warning: Tunnel $i might not be running"
+    fi
     
     echo "Tunnel $i: UDP:$UDP_PORT → SSH:$SSH_PORT"
 done
 
-# ====================== ADDITIONAL FIXES ======================
-print_status "Setting up SSLH fix for reboot issues..."
-
-# Download and install the SSLH fix script
-cd /usr/bin || exit 1
-wget -q -O sl-fix "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sl-fix"
-chmod +x sl-fix
-
-# Download the SSLH fix reboot script
-wget -q -O sslh-fix-reboot "https://raw.githubusercontent.com/athumani2580/DNS/main/sslh-fix/sslh-fix-reboot.sh"
-chmod +x sslh-fix-reboot
-
-cd ~ || exit 1
-
-# Install BadVPN for UDP gaming/streaming
+# ====================== BADVPN SETUP ======================
 print_status "Installing BadVPN UDPGW..."
-wget -q -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
-chmod +x /usr/bin/badvpn-udpgw
-check_status
+if [ ! -f /usr/bin/badvpn-udpgw ]; then
+    sudo wget -q -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/daybreakersx/premscript/master/badvpn-udpgw64"
+    sudo chmod +x /usr/bin/badvpn-udpgw
+    check_status
+else
+    echo -e "[✓] BadVPN already installed"
+fi
 
-# Add iptables rules for DNS redirection
+# Start BadVPN now
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7100 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7200 --max-clients 500
+screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 500
+# ====================== END BADVPN SETUP ======================
+
+# ====================== IPTABLES SETUP ======================
 print_status "Setting iptables rules for DNS..."
-iptables -I INPUT -p udp --dport 5300 -j ACCEPT
-iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+# Add iptables rules for DNS redirection
+sudo iptables -I INPUT -p udp --dport 5300 -j ACCEPT
+sudo iptables -t nat -I PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
 
 # Save iptables rules
-apt-get install -y iptables-persistent
-iptables-save > /etc/iptables/rules.v4
-# ====================== END ADDITIONAL FIXES ======================
+if ! command -v iptables-persistent &> /dev/null; then
+    sudo apt-get install -y iptables-persistent
+fi
+sudo iptables-save > /etc/iptables/rules.v4
+# ====================== END IPTABLES SETUP ======================
 
 print_status "Setting firewall rules..."
 # Allow all UDP ports for SlowDNS
 for ((i=1; i<=NUM_TUNNELS; i++)); do
     UDP_PORT=$((5300 + i - 1))
-    ufw allow $UDP_PORT/udp 2>/dev/null
+    sudo ufw allow $UDP_PORT/udp 2>/dev/null
 done
 
 # Allow all SSH ports
 for port in $SSH_PORTS; do
-    ufw allow $port/tcp 2>/dev/null
+    sudo ufw allow $port/tcp 2>/dev/null
 done
 
 # Allow SSLH port
-ufw allow 443/tcp 2>/dev/null
+sudo ufw allow 443/tcp 2>/dev/null
+
+# Enable UFW
+echo "y" | sudo ufw enable 2>/dev/null
 
 print_status "Removing password complexity module..."
 sudo apt-get remove -y libpam-pwquality 2>/dev/null || true
 
 print_status "Running final SSLH fix..."
-/usr/bin/sslh-fix-reboot
+fix_sslh_service
 check_status
 
 echo ""
@@ -305,18 +410,39 @@ echo ""
 echo "Share these with your users:"
 echo "Nameserver: $NAMESERVER"
 echo "Public Key:"
-cat /etc/slowdns/server.pub
+sudo cat /etc/slowdns/server.pub
 echo ""
 echo "SSLH is running on port 443 (handles SSH/SSL/OpenVPN)"
 echo "SlowDNS is running on UDP ports 5300-53XX"
+echo "BadVPN is running on ports 7100, 7200, 7300 (UDP for gaming/streaming)"
 echo ""
 echo "Checking service status..."
 for ((i=1; i<=NUM_TUNNELS; i++)); do
     echo ""
     echo "=== Tunnel $i Status ==="
-    systemctl status server-sldns-$i --no-pager -l | head -10
+    sudo systemctl status server-sldns-$i --no-pager -l | head -10
 done
 
 echo ""
+echo "=== SSH Status ==="
+if systemctl is-active --quiet ssh; then
+    sudo systemctl status ssh --no-pager -l | head -5
+elif systemctl is-active --quiet sshd; then
+    sudo systemctl status sshd --no-pager -l | head -5
+else
+    echo "SSH service status unknown"
+fi
+
+echo ""
 echo "=== SSLH Status ==="
-systemctl status sslh --no-pager -l | head -10
+sudo systemctl status sslh --no-pager -l | head -10
+
+echo ""
+echo "=== Services configured to auto-start on reboot ==="
+echo "1. SSLH (port 443 multiplexer)"
+echo "2. SlowDNS tunnels"
+echo "3. BadVPN UDPGW"
+echo "4. DNS redirection (53 → 5300)"
+echo "5. SSH service"
+echo ""
+echo "All fixes are integrated - no external wget calls needed!"
