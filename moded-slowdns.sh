@@ -48,7 +48,7 @@ print_status "Creating new resolv.conf with Google DNS..."
 echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
 check_status
 
-cd ~ || exit 1
+fi
 
 print_status "Configuring SSH..."
 echo "Port 22" | sudo tee -a /etc/ssh/sshd_config > /dev/null
