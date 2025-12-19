@@ -48,8 +48,6 @@ print_status "Creating new resolv.conf with Google DNS..."
 echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" | tee /etc/resolv.conf > /dev/null
 check_status
 
-fi
-
 print_status "Configuring SSH..."
 echo "Port 22" | sudo tee -a /etc/ssh/sshd_config > /dev/null
 sed -i 's/#AllowTcpForwarding yes/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
@@ -78,14 +76,12 @@ cd ~ || exit 1
 print_status "Configuring SlowDNS service..."
 read -p "Enter nameserver: " NAMESERVER
 
-# Validate nameserver input
 if [ -z "$NAMESERVER" ]; then
     echo "[!] Error: Nameserver cannot be empty!"
     exit 1
 fi
 
-# Create service file
-tee /etc/systemd/system/server-sldns.service > /dev/null << EOF
+tee /etc/systemd/system/server-sldns.service > /dev/null <<EOF
 [Unit]
 Description=DNSTT by mrchiddy
 After=network.target
